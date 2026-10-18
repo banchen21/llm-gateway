@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/gateway-core",
+    "crates/gateway-server",
+    "apps/desktop/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["banch"]
+repository = "https://github.com/banchen21/llm-gateway"
+homepage = "https://github.com/banchen21/llm-gateway"
+description = "A local gateway that speaks the Anthropic Messages API to clients and Anthropic or OpenAI to upstream providers."
+
+[workspace.dependencies]
+gateway-core = { path = "crates/gateway-core" }
+gateway-server = { path = "crates/gateway-server" }
+
+async-stream = "0.3"
+axum = "0.8"
+bytes = "1"
+directories = "6"
+eventsource-stream = "0.2"
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "http2",
+    # Trust the OS certificate store so a corporate TLS-inspecting proxy works.
+    "rustls",
+    "rustls-native-certs",
+] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Keep local builds compact: dependency debug info dominates target/ and is
+# rarely useful, while line tables for our own crates keep backtraces readable.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+debug = 0

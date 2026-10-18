@@ -1,0 +1,33 @@
+[package]
+name = "llm-gateway-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# Tauri v2 builds the desktop app as a library plus a thin binary, so the same entry
+# point can also be used by the mobile targets.
+name = "llm_gateway_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Without this Tauri treats every build as `tauri dev`: the window loads `devUrl`
+# (localhost:5173) instead of the frontend embedded in the binary, so a plain
+# `cargo build` produces an app that cannot start unless Vite happens to be running.
+# Default it on: the desktop binary is meant to be runnable on its own.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+gateway-core.workspace = true
+gateway-server.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

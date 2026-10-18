@@ -1,0 +1,27 @@
+name: Feature request
+description: A capability the gateway does not have yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and where the gateway gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: A concrete shape for the change, if you have one.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it belongs
+      options:
+        - Protocol conversion
+        - Provider / model configuration
+        - Desktop GUI
+        - CLI / headless server
+        - Documentation
+        - Not sure

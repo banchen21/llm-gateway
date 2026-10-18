@@ -1,0 +1,4 @@
+# pnpm 11 reads build-script approval from this file rather than package.json.
+# esbuild needs its postinstall to place the platform binary that Vite runs.
+allowBuilds:
+  esbuild: true

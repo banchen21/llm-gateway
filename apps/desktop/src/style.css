@@ -1,0 +1,85 @@
+/* A compact control-panel feel: dense rows, technical values in monospace, and one
+   accent colour reserved for state the operator needs to notice. */
+:root {
+  --gw-accent: #2f6f5e;
+  --gw-line: #e2e5e9;
+  --gw-muted: #6b7480;
+  --gw-surface: #ffffff;
+  --gw-canvas: #f5f6f8;
+  --gw-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, monospace;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--gw-canvas);
+  color: #1f2429;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+.mono {
+  font-family: var(--gw-mono);
+  font-size: 12px;
+}
+
+/* Section headings inside a page: quiet, uppercase, with a rule that reaches the edge. */
+.gw-section {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.gw-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #2b3138;
+}
+
+.gw-section-note {
+  font-size: 12px;
+  color: var(--gw-muted);
+}
+
+.gw-hint {
+  color: var(--gw-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.gw-empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--gw-muted);
+  background: var(--gw-surface);
+  border: 1px dashed var(--gw-line);
+  border-radius: 6px;
+}
+
+/* Element Plus defaults are roomier than a dense settings screen wants. */
+.el-card {
+  --el-card-padding: 16px;
+}
+
+.el-form-item {
+  margin-bottom: 14px;
+}
+
+.el-table .cell {
+  font-size: 13px;
+}
