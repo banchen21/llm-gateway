@@ -12,7 +12,7 @@
 你的客户端只会说一种协议，而你的供应商分散在两种协议上。网关把这层差异吸收掉——
 一个 OpenAI 兼容的供应商可以变成 Anthropic 兼容的，反之亦然，客户端无需知道。
 
-![供应商配置](docs/screenshots/providers.png)
+![网关界面：供应商、请求记录、使用说明](docs/screenshots/tour.gif)
 
 ## 为什么需要它
 
@@ -32,6 +32,8 @@
 - **协议模式。** 只开 Anthropic、只开 OpenAI，或两个都开；切换无需重启。
 
 ## 快速开始
+
+预编译二进制在 [Releases](https://github.com/banchen21/llm-gateway/releases)。从源码构建：
 
 **桌面版**（窗口内嵌网关）：
 
@@ -193,7 +195,7 @@ cd apps/desktop && pnpm typecheck
 - 不支持 Anthropic 的 `/v1/responses` 风格接口与 OpenAI 的 Responses API；网关只说 Messages 和 Chat Completions。
 - `count_tokens` 是按请求字符数估算的，不是真正的分词器；响应头会带 `x-token-count: approximate` 说明这一点。
 - 不会向上游注入 prompt cache 断点（Anthropic 的 `cache_control`）或 `prompt_cache_key`；上游**返回**的缓存字段会原样透传。
-- 暂未发布预编译二进制，请从源码构建。
+- 预编译二进制见 [Releases](https://github.com/banchen21/llm-gateway/releases)，覆盖 Windows、Linux 和 macOS。macOS 只提供无头服务端；桌面壳需要从源码构建。
 
 ## 许可证
 

@@ -14,7 +14,7 @@ Your clients only speak one protocol. Your providers are split across two. The g
 absorbs the difference, so an OpenAI-compatible vendor becomes an Anthropic-compatible one
 and back, without the client knowing.
 
-![Provider configuration](docs/screenshots/providers.png)
+![The gateway's GUI: providers, request log, and usage guide](docs/screenshots/tour.gif)
 
 ## Why
 
@@ -41,6 +41,9 @@ see what actually happened.
   effect without a restart.
 
 ## Quick start
+
+Prebuilt binaries are on the [Releases](https://github.com/banchen21/llm-gateway/releases) page.
+To build from source:
 
 **Desktop app** (the window runs the gateway inside it):
 
@@ -216,7 +219,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the layout and the review checklist.
 - Prompt-cache breakpoints (`cache_control`) are not added to Anthropic upstream requests,
   and `prompt_cache_key` is not added to OpenAI ones. Cache fields reported *by* an upstream
   are passed through faithfully.
-- Prebuilt binaries are not published yet; build from source.
+- Prebuilt binaries cover Windows, Linux and macOS on the
+  [Releases](https://github.com/banchen21/llm-gateway/releases) page. The macOS build ships the
+  headless server only; the desktop shell has to be built from source there.
 
 ## License
 

@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gui:
+    name: Build the GUI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-dist
+          path: apps/desktop/dist
+          retention-days: 1
+
+  build:
+    name: ${{ matrix.name }}
+    needs: gui
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            package: llm-gateway-windows-x86_64.zip
+            binaries: llm-gateway-desktop.exe gateway-server.exe
+          - name: Linux
+            os: ubuntu-22.04
+            package: llm-gateway-linux-x86_64.tar.gz
+            binaries: llm-gateway-desktop gateway-server
+          # The Tauri shell needs a bundle to behave like an app on macOS, so only the
+          # headless server is shipped there for now.
+          - name: macOS
+            os: macos-latest
+            package: llm-gateway-macos-aarch64.tar.gz
+            binaries: gateway-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui-dist
+          path: apps/desktop/dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install webview dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cargo build --release -p gateway-server
+          else
+            cargo build --release -p gateway-server -p llm-gateway-desktop
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for bin in ${{ matrix.binaries }}; do cp "target/release/$bin" dist/; done
+          cp README.md LICENSE dist/
+          cd dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "../${{ matrix.package }}" ./*
+          else
+            tar czf "../${{ matrix.package }}" ./*
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}
+          path: ${{ matrix.package }}
+          retention-days: 1
+
+  release:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Prebuilt binaries for this release. Unpack and run:
+
+            - `gateway-server` — the headless gateway
+            - `llm-gateway-desktop` — the desktop window (Windows and Linux)
+
+            The binaries are unsigned. On macOS only the headless server is shipped;
+            the desktop shell has to be built from source for now.
