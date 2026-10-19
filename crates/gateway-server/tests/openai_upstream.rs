@@ -247,3 +247,36 @@ async fn a_request_to_reason_is_accepted_and_left_out_of_an_openai_body() {
         "OpenAI carries reasoning as `reasoning_effort`, not as an Anthropic block"
     );
 }
+
+/// Providers that think in Chat Completions mode reject a follow-up that loses the
+/// previous turn's reasoning, so a signed thinking block has to travel as text.
+#[tokio::test]
+async fn signed_reasoning_is_replayed_to_an_openai_upstream() {
+    let upstream = start_upstream("/v1/chat/completions", TEXT_AND_TOOL_SSE).await;
+    let gateway = start_gateway_with(
+        &upstream,
+        ProviderProtocol::OpenAi,
+        ProtocolMode::PrimaryAnthropic,
+        MaxTokensField::default(),
+    )
+    .await;
+
+    let payload = json!({
+        "model": "test-model",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "weighing options", "signature": "sig-abc"},
+                {"type": "text", "text": "hi"}
+            ]},
+            {"role": "user", "content": "again"}
+        ]
+    });
+    assert_eq!(post_messages(&gateway, &payload).await.status(), 200);
+
+    let sent = upstream.last_request();
+    assert_eq!(sent["messages"][1]["role"], "assistant");
+    assert_eq!(sent["messages"][1]["reasoning_content"], "weighing options");
+    assert_eq!(sent["messages"][1]["content"], "hi");
+}

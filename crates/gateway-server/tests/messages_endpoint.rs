@@ -641,3 +641,36 @@ async fn the_response_names_the_provider_that_answered() {
         "upstream-model"
     );
 }
+
+/// Reasoning that came from an OpenAI-compatible upstream has no signature. The official
+/// API requires one, compatible vendors instead require the block itself to be present.
+#[tokio::test]
+async fn unsigned_reasoning_is_replayed_to_a_compatible_upstream() {
+    let upstream = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+    let gateway = start_gateway(&upstream, ProviderProtocol::Anthropic).await;
+
+    let payload = json!({
+        "model": "test-model",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "weighing options"},
+                {"type": "text", "text": "hi"}
+            ]},
+            {"role": "user", "content": "again"}
+        ]
+    });
+    assert_eq!(post_messages(&gateway, &payload).await.status(), 200);
+
+    let sent = upstream.last_request();
+    assert_eq!(sent["messages"][1]["content"][0]["type"], "thinking");
+    assert_eq!(
+        sent["messages"][1]["content"][0]["thinking"],
+        "weighing options"
+    );
+    assert!(
+        sent["messages"][1]["content"][0].get("signature").is_none(),
+        "a signature is not invented"
+    );
+}

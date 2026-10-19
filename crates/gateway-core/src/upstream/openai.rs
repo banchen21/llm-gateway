@@ -220,12 +220,11 @@ fn assistant_message(message: &crate::ir::Message, output: &mut Vec<Value>) -> R
     for part in &message.content {
         match part {
             ContentPart::Text { text: part } => text.push_str(part),
-            // Only unsigned reasoning is replayed, which by construction is what came
-            // from an OpenAI-compatible upstream.
-            ContentPart::Thinking {
-                text: part,
-                signature: None,
-            } => reasoning.push_str(part),
+            // Reasoning is replayed whatever its origin: providers that think in Chat
+            // Completions mode (DeepSeek among them) reject a follow-up that omits the
+            // previous turn's `reasoning_content`. The signature means nothing to them,
+            // so only the text travels.
+            ContentPart::Thinking { text: part, .. } => reasoning.push_str(part),
             ContentPart::ToolUse { id, name, input } => calls.push(json!({
                 "id": normalized_tool_call_id(id),
                 "type": "function",

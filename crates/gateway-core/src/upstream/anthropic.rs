@@ -69,7 +69,13 @@ fn request_body(call: &UpstreamCall) -> Result<Value> {
     if let Some(system) = &request.system {
         body.insert("system".into(), json!([{"type": "text", "text": system}]));
     }
-    body.insert("messages".into(), json!(messages(request)?));
+    body.insert(
+        "messages".into(),
+        json!(messages(
+            request,
+            requires_signature(&call.config.base_url)
+        )?),
+    );
     if let Some(temperature) = request.temperature {
         body.insert("temperature".into(), json!(temperature));
     }
@@ -130,14 +136,30 @@ fn thinking(config: &Option<ThinkingConfig>) -> Option<Value> {
         .map(|budget| json!({"type": "enabled", "budget_tokens": budget}))
 }
 
-fn messages(request: &ChatRequest) -> Result<Vec<Value>> {
+/// Whether this endpoint demands a signature on every thinking block.
+///
+/// Only Anthropic's own API does; compatible vendors accept a block without one, and
+/// some require the block to be present.
+fn requires_signature(base_url: &str) -> bool {
+    let host = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    host.eq_ignore_ascii_case("api.anthropic.com")
+        || host.to_ascii_lowercase().ends_with(".anthropic.com")
+}
+
+fn messages(request: &ChatRequest, strict: bool) -> Result<Vec<Value>> {
     let mut output: Vec<Value> = Vec::new();
     for message in &request.messages {
         let role = match message.role {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
-        let content = blocks(role, &message.content)?;
+        let content = blocks(role, &message.content, strict)?;
         if content.is_empty() {
             continue;
         }
@@ -162,14 +184,13 @@ fn push_message(output: &mut Vec<Value>, role: &str, content: Vec<Value>) {
     output.push(json!({"role": role, "content": content}));
 }
 
-fn blocks(role: &str, parts: &[ContentPart]) -> Result<Vec<Value>> {
+fn blocks(role: &str, parts: &[ContentPart], strict: bool) -> Result<Vec<Value>> {
     let mut output = Vec::new();
     for part in parts {
         match part {
             // Anthropic rejects empty text blocks.
             ContentPart::Text { text } if text.is_empty() => {}
             ContentPart::Text { text } => output.push(json!({"type": "text", "text": text})),
-            // Only signed reasoning is replayable; Anthropic rejects an unsigned block.
             ContentPart::Thinking {
                 text,
                 signature: Some(signature),
@@ -178,6 +199,15 @@ fn blocks(role: &str, parts: &[ContentPart]) -> Result<Vec<Value>> {
                 "thinking": text,
                 "signature": signature,
             })),
+            // Reasoning that arrived from an OpenAI-compatible upstream has no
+            // signature. The official API rejects such a block, but DeepSeek-compatible
+            // endpoints not only accept it — they reject the follow-up when it is
+            // missing, so dropping it would break every conversation that changed
+            // providers mid-way.
+            ContentPart::Thinking {
+                text,
+                signature: None,
+            } if !strict => output.push(json!({"type": "thinking", "thinking": text})),
             ContentPart::Thinking {
                 signature: None, ..
             } => {}
@@ -228,7 +258,7 @@ fn tool_result_content(parts: &[ContentPart]) -> Result<Value> {
     match parts {
         [] => Ok(json!("")),
         [ContentPart::Text { text }] => Ok(json!(text)),
-        parts => Ok(json!(blocks("user", parts)?)),
+        parts => Ok(json!(blocks("user", parts, false)?)),
     }
 }
 
@@ -499,4 +529,19 @@ fn truncate(body: String) -> String {
         .map(|(index, _)| index)
         .unwrap_or(body.len());
     format!("{}…", &body[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_signature;
+
+    #[test]
+    fn only_the_official_api_requires_a_signature() {
+        assert!(requires_signature("https://api.anthropic.com"));
+        assert!(requires_signature("https://api.anthropic.com/v1"));
+        assert!(requires_signature("https://eu.anthropic.com"));
+        assert!(!requires_signature("https://api.deepseek.com/anthropic"));
+        assert!(!requires_signature("http://127.0.0.1:8080"));
+        assert!(!requires_signature(""));
+    }
 }
