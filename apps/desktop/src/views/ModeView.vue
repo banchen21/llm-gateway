@@ -115,6 +115,14 @@ async function copy(text: string) {
             Bearer。Anthropic SDK 要求必须传一个 key，所以这里填一个占位值也很常见。
           </div>
         </el-form-item>
+        <el-alert
+          v-if="health?.proxy_from_env"
+          type="warning"
+          show-icon
+          :closable="false"
+          title="上游请求会经过代理"
+          description="当前进程设置了 ALL_PROXY / HTTP(S)_PROXY。代理退出后上游会报 tunnel error；清除环境变量并重启网关即可恢复直连。"
+        />
       </el-form>
     </el-card>
 

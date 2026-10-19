@@ -91,6 +91,8 @@ export interface Health {
   providers: number
   aliases: number
   web_ui_enabled: boolean
+  /** Whether ALL_PROXY / HTTP(S)_PROXY are set for the gateway process. */
+  proxy_from_env: boolean
   config_readable: boolean
   inbound_api_key_required: boolean
 }

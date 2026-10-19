@@ -201,6 +201,20 @@ unless you set `web_ui.token`, because that same API reads and writes those keys
 **`PUT /admin/config` replaces the whole document.** A body containing only part of the
 configuration clears the rest. The GUI always sends the complete document.
 
+## Proxies
+
+The gateway reads proxy settings from the environment — `ALL_PROXY`, `HTTP_PROXY`,
+`HTTPS_PROXY` and their lowercase forms, with `NO_PROXY` respected. It does **not** read
+the operating system's proxy settings, so turning a system-wide proxy on or off does not
+change how an already-running gateway reaches its upstreams: a process started without
+those variables connects directly.
+
+That leaves one practical trap. If something in your shell or user environment sets
+`HTTPS_PROXY`, a gateway started afterwards tunnels through that proxy; when the proxy
+stops, upstream calls fail with `tunnel error` until the gateway is restarted without the
+variable. `GET /admin/health` reports `proxy_from_env`, and the mode page shows a warning
+while it is true.
+
 ## The GUI
 
 | | |
