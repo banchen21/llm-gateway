@@ -133,7 +133,7 @@ async function copy(text: string) {
           show-icon
           :closable="false"
           title="直连失败时会自动尝试系统代理"
-          description="检测到 Windows 已开启系统代理。网关默认直连，只有连接失败时才通过它重试；两者都不通时会在 Windows 通知中心提示网络问题。"
+          :description="`检测到 Windows 已开启系统代理。当前优先：${health?.preferred_path === 'proxy' ? '代理' : '直连'}（按最近实测表现决定）；两者都不通时会在 Windows 通知中心提示网络问题。`"
         />
       </el-form>
     </el-card>

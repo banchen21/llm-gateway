@@ -159,6 +159,10 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
         "inbound_api_key_required": !super::inbound_keys(&snapshot.config).is_empty(),
         "proxy_from_env": crate::proxy::from_env(),
         "system_proxy_available": crate::proxy::system_proxy().is_some(),
+        "preferred_path": match state.preferred_path() {
+            crate::state::Path::Direct => "direct",
+            crate::state::Path::Proxy => "proxy",
+        },
     }))
     .into_response()
 }

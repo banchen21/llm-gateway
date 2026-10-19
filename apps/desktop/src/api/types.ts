@@ -97,6 +97,8 @@ export interface Health {
   proxy_from_env: boolean
   /** Whether the operating system has a proxy configured to fall back to. */
   system_proxy_available: boolean
+  /** Which path recent measurements favour. */
+  preferred_path: 'direct' | 'proxy'
   config_readable: boolean
   inbound_api_key_required: boolean
 }

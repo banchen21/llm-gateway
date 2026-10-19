@@ -26,7 +26,7 @@ use gateway_core::Error;
 use serde_json::{json, Value};
 
 use crate::logging::{self, Outcome, PromptShape, Record};
-use crate::state::AppState;
+use crate::state::{AppState, Path};
 
 /// The protocols the gateway speaks on its inbound side.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -139,15 +139,26 @@ async fn serve_inner(
     }
 
     let usage = Arc::new(Mutex::new(None));
+    // Recent behaviour decides whether this request starts down the direct path or the
+    // proxy; a lone measurement is not enough to switch, and the loser is still probed.
+    let chosen = state.choose_path();
+    let client = match chosen {
+        Path::Proxy => state
+            .client_via_system_proxy()
+            .unwrap_or_else(|| state.http.clone()),
+        Path::Direct => state.http.clone(),
+    };
+    let opening = std::time::Instant::now();
     let mut primary = call_upstream(
         state,
         &provider,
         &request,
         &upstream_model,
-        state.http.clone(),
+        client,
         deadline,
     )
     .await;
+    state.record_path(chosen, opening.elapsed(), primary.is_ok());
 
     // The first byte never arrived. Treat it as a stall rather than an answer: remember
     // it so the next request skips this route, and let another provider try now.
@@ -182,11 +193,19 @@ async fn serve_inner(
         }
     }
 
-    // A connection that fails directly may still get through the proxy Windows is
-    // configured to use. That proxy is deliberately ignored everywhere else: making it
-    // the default would route domestic upstreams through whatever tunnel happens to run.
-    if matches!(&primary, Err(Error::Http(_))) && !crate::proxy::from_env() {
-        if let Some(client) = state.client_via_system_proxy() {
+    // Whichever path was not tried first gets one chance: a tunnel can be down while
+    // direct still works, and the reverse.
+    if matches!(&primary, Err(Error::Http(_))) {
+        let other = match chosen {
+            Path::Direct => Path::Proxy,
+            Path::Proxy => Path::Direct,
+        };
+        let other_client = match other {
+            Path::Proxy => state.client_via_system_proxy(),
+            Path::Direct => Some(state.http.clone()),
+        };
+        if let Some(client) = other_client {
+            let opening = std::time::Instant::now();
             primary = call_upstream(
                 state,
                 &provider,
@@ -196,6 +215,7 @@ async fn serve_inner(
                 deadline,
             )
             .await;
+            state.record_path(other, opening.elapsed(), primary.is_ok());
         }
     }
 
