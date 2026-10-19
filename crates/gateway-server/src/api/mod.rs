@@ -112,21 +112,38 @@ async fn serve_inner(
 
     let prompt = PromptShape::of(&request);
     let alias = request.model.clone();
-    let provider_name = route.provider.name.clone();
-    let upstream_model = route.model.upstream_model.clone();
+    let mut provider_name = route.provider.name.clone();
+    let mut upstream_model = route.model.upstream_model.clone();
     let streaming = request.stream;
+    let primary_provider_id = route.provider.id.clone();
     let provider = provider_config(route.provider, route.model);
 
     let usage = Arc::new(Mutex::new(None));
-    let events = match upstream::stream(UpstreamCall {
+    let primary = upstream::stream(UpstreamCall {
         client: state.http.clone(),
         config: provider,
-        request,
+        request: request.clone(),
         model: upstream_model.clone(),
         key_start: state.next_key_start(),
     })
-    .await
-    {
+    .await;
+
+    let attempted = match primary {
+        Ok(events) => Ok(events),
+        Err(error) if snapshot.config.failover && error.is_provider_refusal() => {
+            match failover(state, &snapshot.config, &request, &primary_provider_id).await {
+                Some((events, provider, model)) => {
+                    provider_name = provider;
+                    upstream_model = model;
+                    Ok(events)
+                }
+                None => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    };
+
+    let events = match attempted {
         Ok(events) => events,
         Err(error) => {
             state
@@ -256,6 +273,50 @@ fn presented_key(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Projects a resolved route into the configuration an upstream adapter needs.
+/// Asks the other enabled providers, in configuration order, when the one the alias
+/// names refuses the request.
+///
+/// An alias means nothing to another provider, so each candidate answers with its own
+/// first enabled model. That is the deliberate compromise of a switch that needs no
+/// per-alias setup: the client keeps working, and the request log records which provider
+/// and model actually answered.
+async fn failover(
+    state: &Arc<AppState>,
+    config: &Config,
+    request: &ChatRequest,
+    primary_provider_id: &str,
+) -> Option<(gateway_core::ir::EventStream, String, String)> {
+    for candidate in &config.providers {
+        if !candidate.enabled || candidate.id == primary_provider_id {
+            continue;
+        }
+        let Some(model) = candidate.models.iter().find(|model| model.enabled) else {
+            continue;
+        };
+        let call = UpstreamCall {
+            client: state.http.clone(),
+            config: provider_config(candidate, model),
+            request: request.clone(),
+            model: model.upstream_model.clone(),
+            key_start: state.next_key_start(),
+        };
+        match upstream::stream(call).await {
+            Ok(events) => {
+                tracing::warn!(
+                    provider = %candidate.name,
+                    model = %model.upstream_model,
+                    "the primary provider refused; a fallback answered"
+                );
+                return Some((events, candidate.name.clone(), model.upstream_model.clone()));
+            }
+            Err(error) => {
+                tracing::warn!(provider = %candidate.name, %error, "a fallback provider failed too");
+            }
+        }
+    }
+    None
+}
+
 pub fn provider_config(provider: &Provider, model: &ProviderModel) -> ProviderConfig {
     ProviderConfig {
         protocol: provider.protocol,

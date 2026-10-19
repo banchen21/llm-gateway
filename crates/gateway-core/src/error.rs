@@ -51,6 +51,15 @@ fn transport_message(error: &reqwest::Error) -> String {
 }
 
 impl Error {
+    /// Whether another provider might answer where this one refused.
+    ///
+    /// These are the refusals that are about the account rather than the request: quota
+    /// exhausted (429), a rejected credential (401), or a plan that excludes the model
+    /// (403). A malformed request would fail everywhere, so it is not included.
+    pub fn is_provider_refusal(&self) -> bool {
+        matches!(self, Error::Upstream { status, .. } if matches!(status, 401 | 403 | 429))
+    }
+
     /// The HTTP status this error should surface as at the gateway's edge.
     pub fn http_status(&self) -> u16 {
         match self {

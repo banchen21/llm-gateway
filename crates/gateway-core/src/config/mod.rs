@@ -53,6 +53,9 @@ pub struct Config {
     pub providers: Vec<Provider>,
     /// Catch-all used when a client asks for a model no alias matches.
     pub default_provider_id: Option<String>,
+    /// When the provider an alias names refuses the request (quota, credential, plan),
+    /// try the other enabled providers before failing the call.
+    pub failover: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

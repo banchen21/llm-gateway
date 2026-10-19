@@ -44,6 +44,8 @@ see what actually happened.
   effect without a restart.
 - **Fetch models from the upstream.** One call fills the model table instead of typing
   names by hand.
+- **Automatic failover.** When the provider an alias names refuses (quota, credential,
+  plan), the other enabled providers are tried in order and the log records who answered.
 - **A speed test page.** One click runs every alias through the same fixed prompt and
   reports first-byte latency, total time and tokens per second.
 

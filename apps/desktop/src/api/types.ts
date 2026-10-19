@@ -73,6 +73,8 @@ export interface GatewayConfig {
   providers: Provider[]
   /** Catch-all for model names no alias matches. */
   default_provider_id: string | null
+  /** When a provider refuses (quota, credential, plan), try the other enabled ones. */
+  failover: boolean
 }
 
 export interface ConfigEnvelope {
@@ -156,6 +158,7 @@ export function emptyConfig(): GatewayConfig {
     web_ui: { enabled: false, token: null },
     providers: [],
     default_provider_id: null,
+    failover: false,
   }
 }
 

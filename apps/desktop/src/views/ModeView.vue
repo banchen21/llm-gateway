@@ -184,6 +184,17 @@ async function copy(text: string) {
         />
       </el-select>
       <div v-if="!config.providers.length" class="gw-hint">还没有供应商可选，请先在供应商页添加。</div>
+
+      <el-divider />
+
+      <div class="failover">
+        <el-switch v-model="config.failover" />
+        <span class="failover-label">额度用尽时自动切换供应商</span>
+      </div>
+      <p class="gw-hint">
+        当别名指向的供应商返回 429（额度）、401（密钥）或 403（套餐）时，按「供应商」页里的顺序尝试其他已启用的供应商，
+        并用它们的第一个模型顶替。请求日志会记录实际应答的供应商与模型。
+      </p>
     </el-card>
   </div>
 </template>
@@ -194,6 +205,18 @@ async function copy(text: string) {
   grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
   gap: 16px;
   align-items: start;
+}
+
+.failover {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.failover-label {
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .wide {
