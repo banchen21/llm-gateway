@@ -44,8 +44,8 @@ see what actually happened.
   effect without a restart.
 - **Fetch models from the upstream.** One call fills the model table instead of typing
   names by hand.
-- **A speed test page.** Send N requests through a chosen alias and see first-byte and
-  total time per run, with medians.
+- **A speed test page.** One click runs every alias through the same fixed prompt and
+  reports first-byte latency, total time and tokens per second.
 
 ## Quick start
 
