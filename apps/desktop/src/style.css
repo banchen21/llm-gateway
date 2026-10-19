@@ -1,11 +1,16 @@
-/* A compact control-panel feel: dense rows, technical values in monospace, and one
-   accent colour reserved for state the operator needs to notice. */
+/* A control-panel feel: dense rows, technical values in monospace, and one accent colour
+   reserved for state the operator needs to notice. */
 :root {
   --gw-accent: #2f6f5e;
-  --gw-line: #e2e5e9;
-  --gw-muted: #6b7480;
+  --gw-accent-tint: #e9f1ee;
+  --gw-ink: #141a1f;
+  --gw-slate: #616b76;
+  --gw-muted: #7c858f;
+  --gw-line: #e3e7ea;
   --gw-surface: #ffffff;
-  --gw-canvas: #f5f6f8;
+  --gw-canvas: #f3f5f6;
+  --gw-danger: #b0453b;
+  --gw-danger-tint: #faeceb;
   --gw-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, monospace;
 
   color-scheme: light;
@@ -24,9 +29,9 @@ body,
 
 body {
   background: var(--gw-canvas);
-  color: #1f2429;
+  color: var(--gw-ink);
   font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  font-size: 14px;
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -34,9 +39,10 @@ code,
 .mono {
   font-family: var(--gw-mono);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Section headings inside a page: quiet, uppercase, with a rule that reaches the edge. */
+/* Section headings inside a page: quiet, with the note trailing behind. */
 .gw-section {
   display: flex;
   align-items: baseline;
@@ -47,8 +53,16 @@ code,
 .gw-section-title {
   font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  color: #2b3138;
+  letter-spacing: 0.02em;
+  color: var(--gw-ink);
+}
+
+/* The small-caps label voice of the panel: used for column heads and readouts. */
+.gw-micro {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  color: var(--gw-muted);
 }
 
 .gw-section-note {
@@ -57,7 +71,7 @@ code,
 }
 
 .gw-hint {
-  color: var(--gw-muted);
+  color: var(--gw-slate);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -68,18 +82,63 @@ code,
   color: var(--gw-muted);
   background: var(--gw-surface);
   border: 1px dashed var(--gw-line);
-  border-radius: 6px;
+  border-radius: 10px;
 }
 
 /* Element Plus defaults are roomier than a dense settings screen wants. */
 .el-card {
   --el-card-padding: 16px;
+  border-radius: 10px;
+}
+
+.el-card__header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--gw-line);
 }
 
 .el-form-item {
   margin-bottom: 14px;
 }
 
+.el-table {
+  --el-table-border-color: var(--gw-line);
+  --el-table-header-bg-color: var(--gw-canvas);
+  --el-table-header-text-color: var(--gw-muted);
+  --el-table-row-hover-bg-color: #f6f8f8;
+  font-variant-numeric: tabular-nums;
+}
+
+.el-table th.el-table__cell {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+}
+
 .el-table .cell {
   font-size: 13px;
+  line-height: 1.5;
+}
+
+.el-table td.el-table__cell {
+  padding: 7px 0;
+}
+
+/* The expand arrow is chrome; keep it quiet until the row is hovered. */
+.el-table__expand-icon {
+  color: var(--gw-muted);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cfd5da;
+  border: 3px solid var(--gw-canvas);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }

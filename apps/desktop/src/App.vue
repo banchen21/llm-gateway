@@ -179,12 +179,13 @@ function applyToken() {
   place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--gw-accent);
   color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-family: var(--gw-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
 }
 
 .brand-text {
@@ -195,16 +196,39 @@ function applyToken() {
 
 .brand-text strong {
   font-size: 13px;
+  letter-spacing: 0.01em;
 }
 
 .brand-text .mono {
   color: var(--gw-muted);
-  font-size: 11px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
 }
 
 .nav :deep(.el-menu) {
   border-right: none;
   flex: 1;
+  padding: 6px 0;
+}
+
+/* Rounded rows read as a navigation list rather than a full-bleed highlight. */
+.nav :deep(.el-menu-item) {
+  height: 36px;
+  line-height: 36px;
+  margin: 0 8px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--gw-slate);
+}
+
+.nav :deep(.el-menu-item:hover) {
+  background: #f3f5f6;
+}
+
+.nav :deep(.el-menu-item.is-active) {
+  color: var(--gw-accent);
+  background: var(--gw-accent-tint);
+  font-weight: 500;
 }
 
 .nav-foot {

@@ -61,12 +61,16 @@ function timestamp(at: number): string {
 function formatTokens(count: number): string {
   return count ? count.toLocaleString('en-US') : '—'
 }
+
+/** Failed calls carry a coloured rail on the left edge, so they scan without reading. */
+function rowClass({ row }: { row: LogEntry }): string {
+  return row.status >= 400 ? 'failed' : ''
+}
 </script>
 
 <template>
   <div>
     <div class="gw-section">
-      <span class="gw-section-title">请求记录</span>
       <span class="gw-section-note">
         只记录用量与请求形状，不记录消息内容。流式请求会在响应结束后才落盘。
       </span>
@@ -90,28 +94,26 @@ function formatTokens(count: number): string {
       class="mb"
     />
 
-    <div class="summary">
-      <div class="stat">
-        <span class="stat-label">记录数</span>
-        <span class="stat-value mono">{{ entries.length }}</span>
+    <div class="readout">
+      <div class="metric">
+        <span class="gw-micro">记录数</span>
+        <span class="value mono">{{ entries.length }}</span>
       </div>
-      <div class="stat">
-        <span class="stat-label">失败</span>
-        <span class="stat-value mono" :class="{ bad: totals.failures > 0 }">
-          {{ totals.failures }}
-        </span>
+      <div class="metric">
+        <span class="gw-micro">失败</span>
+        <span class="value mono" :class="{ bad: totals.failures > 0 }">{{ totals.failures }}</span>
       </div>
-      <div class="stat">
-        <span class="stat-label">输入 tokens</span>
-        <span class="stat-value mono">{{ formatTokens(totals.input) }}</span>
+      <div class="metric">
+        <span class="gw-micro">输入 TOKENS</span>
+        <span class="value mono">{{ formatTokens(totals.input) }}</span>
       </div>
-      <div class="stat">
-        <span class="stat-label">输出 tokens</span>
-        <span class="stat-value mono">{{ formatTokens(totals.output) }}</span>
+      <div class="metric">
+        <span class="gw-micro">输出 TOKENS</span>
+        <span class="value mono">{{ formatTokens(totals.output) }}</span>
       </div>
-      <div class="stat">
-        <span class="stat-label">命中缓存</span>
-        <span class="stat-value mono">{{ formatTokens(totals.cached) }}</span>
+      <div class="metric">
+        <span class="gw-micro">命中缓存</span>
+        <span class="value mono">{{ formatTokens(totals.cached) }}</span>
       </div>
     </div>
 
@@ -119,18 +121,18 @@ function formatTokens(count: number): string {
       还没有请求记录。配置好供应商后，用 Anthropic 或 OpenAI 客户端向网关发一次请求就会出现。
     </div>
 
-    <el-table v-else :data="entries" size="small" border max-height="620">
-      <el-table-column label="时间" width="164">
+    <el-table v-else :data="entries" size="small" max-height="620" :row-class-name="rowClass">
+      <el-table-column label="时间" width="158">
         <template #default="{ row }">
-          <span class="mono">{{ timestamp(row.at) }}</span>
+          <span class="mono time">{{ timestamp(row.at) }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" width="76" align="center">
+      <el-table-column label="状态" width="88">
         <template #default="{ row }">
-          <el-tag :type="row.status < 400 ? 'success' : 'danger'" size="small" effect="light">
-            {{ row.status }}
-          </el-tag>
+          <span class="status" :class="row.status < 400 ? 'ok' : 'bad'">
+            <i class="dot" />{{ row.status }}
+          </span>
         </template>
       </el-table-column>
 
@@ -140,19 +142,21 @@ function formatTokens(count: number): string {
         </template>
       </el-table-column>
 
-      <el-table-column label="供应商" min-width="120" prop="provider" />
-
-      <el-table-column label="上游模型" min-width="150">
+      <el-table-column label="供应商" min-width="186" show-overflow-tooltip>
         <template #default="{ row }">
-          <span class="mono">{{ row.upstream_model }}</span>
+          <span class="provider">{{ row.provider }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="方式" width="72" align="center">
+      <el-table-column label="上游模型" min-width="215" show-overflow-tooltip>
         <template #default="{ row }">
-          <el-tag :type="row.stream ? 'primary' : 'info'" size="small" effect="plain">
-            {{ row.stream ? '流式' : '整包' }}
-          </el-tag>
+          <span class="mono upstream">{{ row.upstream_model }}</span>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="方式" width="76">
+        <template #default="{ row }">
+          <span class="chip" :class="{ stream: row.stream }">{{ row.stream ? '流式' : '整包' }}</span>
         </template>
       </el-table-column>
 
@@ -214,36 +218,97 @@ function formatTokens(count: number): string {
   margin-bottom: 16px;
 }
 
-.summary {
+/* One bar of readouts divided by hairlines, the way an instrument panel stacks gauges. */
+.readout {
   display: flex;
-  flex-wrap: wrap;
-  gap: 28px;
-  padding: 14px 18px;
   margin-bottom: 16px;
   background: var(--gw-surface);
   border: 1px solid var(--gw-line);
-  border-radius: 6px;
+  border-radius: 10px;
+  overflow: hidden;
 }
 
-.stat {
+.metric {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  padding: 11px 18px;
+  min-width: 0;
 }
 
-.stat-label {
-  color: var(--gw-muted);
+.metric + .metric {
+  border-left: 1px solid var(--gw-line);
+}
+
+.value {
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1.15;
+  color: var(--gw-ink);
+}
+
+.value.bad {
+  color: var(--gw-danger);
+}
+
+.time {
+  color: var(--gw-slate);
+  white-space: nowrap;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--gw-mono);
+  font-size: 12px;
+}
+
+.status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status.ok {
+  color: var(--gw-accent);
+}
+
+.status.bad {
+  color: var(--gw-danger);
+}
+
+.provider {
+  color: var(--gw-slate);
+  white-space: nowrap;
+}
+
+.upstream {
+  color: var(--gw-slate);
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--gw-line);
+  border-radius: 4px;
   font-size: 11px;
-  letter-spacing: 0.03em;
+  line-height: 18px;
+  color: var(--gw-muted);
 }
 
-.stat-value {
-  font-size: 16px;
-  font-weight: 600;
+.chip.stream {
+  color: var(--gw-accent);
+  background: var(--gw-accent-tint);
+  border-color: #cfe0da;
 }
 
-.stat-value.bad {
-  color: var(--el-color-danger);
+/* The failure rail: a 3px mark on the row's leading edge. */
+:deep(.el-table__row.failed td:first-child) {
+  box-shadow: inset 3px 0 0 var(--gw-danger);
 }
 
 .detail {
