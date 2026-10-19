@@ -93,6 +93,8 @@ export interface Health {
   web_ui_enabled: boolean
   /** Whether ALL_PROXY / HTTP(S)_PROXY are set for the gateway process. */
   proxy_from_env: boolean
+  /** Whether the operating system has a proxy configured to fall back to. */
+  system_proxy_available: boolean
   config_readable: boolean
   inbound_api_key_required: boolean
 }

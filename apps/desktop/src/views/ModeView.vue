@@ -123,6 +123,14 @@ async function copy(text: string) {
           title="上游请求会经过代理"
           description="当前进程设置了 ALL_PROXY / HTTP(S)_PROXY。代理退出后上游会报 tunnel error；清除环境变量并重启网关即可恢复直连。"
         />
+        <el-alert
+          v-else-if="health?.system_proxy_available"
+          type="info"
+          show-icon
+          :closable="false"
+          title="直连失败时会自动尝试系统代理"
+          description="检测到 Windows 已开启系统代理。网关默认直连，只有连接失败时才通过它重试；两者都不通时会在 Windows 通知中心提示网络问题。"
+        />
       </el-form>
     </el-card>
 

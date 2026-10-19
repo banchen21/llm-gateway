@@ -203,17 +203,19 @@ configuration clears the rest. The GUI always sends the complete document.
 
 ## Proxies
 
-The gateway reads proxy settings from the environment — `ALL_PROXY`, `HTTP_PROXY`,
-`HTTPS_PROXY` and their lowercase forms, with `NO_PROXY` respected. It does **not** read
-the operating system's proxy settings, so turning a system-wide proxy on or off does not
-change how an already-running gateway reaches its upstreams: a process started without
-those variables connects directly.
+The gateway connects **directly** by default. It reads proxy settings from the environment
+(`ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` and their lowercase forms, with `NO_PROXY`
+respected), and treats the operating system's proxy as a rescue path rather than a default:
 
-That leaves one practical trap. If something in your shell or user environment sets
-`HTTPS_PROXY`, a gateway started afterwards tunnels through that proxy; when the proxy
-stops, upstream calls fail with `tunnel error` until the gateway is restarted without the
-variable. `GET /admin/health` reports `proxy_from_env`, and the mode page shows a warning
-while it is true.
+1. The direct connection is tried first.
+2. If it fails, the gateway retries once through the system proxy (read from the Windows
+   registry), building a separate client for it.
+3. If that fails too, it posts a Windows notification — at most once every ten minutes —
+   saying the network or proxy needs attention, and the request log records the failure.
+
+`GET /admin/health` reports `proxy_from_env` and `system_proxy_available`, and the mode page
+shows which of the two is in effect, so a proxy that disappears is visible instead of
+looking like a dead provider.
 
 ## The GUI
 

@@ -157,29 +157,10 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
         "web_ui_assets": crate::webui::assets_are_embedded(),
         "config_readable": loaded,
         "inbound_api_key_required": !super::inbound_keys(&snapshot.config).is_empty(),
-        "proxy_from_env": proxy_from_env(),
+        "proxy_from_env": crate::proxy::from_env(),
+        "system_proxy_available": crate::proxy::system_proxy().is_some(),
     }))
     .into_response()
-}
-
-/// Whether proxy environment variables are in effect for this process.
-///
-/// This build honours `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` (and their lowercase
-/// forms) but does not read the operating system's proxy settings. A sudden upload of
-/// "tunnel error" therefore almost always means an environment variable points at a proxy
-/// that is no longer running; starting the gateway without those variables restores the
-/// direct connection.
-fn proxy_from_env() -> bool {
-    [
-        "ALL_PROXY",
-        "all_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-    ]
-    .iter()
-    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
 /// Empties the request log.

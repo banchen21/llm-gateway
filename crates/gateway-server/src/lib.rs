@@ -5,6 +5,8 @@
 
 pub mod api;
 pub mod logging;
+pub mod notify;
+pub mod proxy;
 pub mod state;
 pub mod webui;
 

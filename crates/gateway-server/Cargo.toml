@@ -21,3 +21,7 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Reading the system proxy the operating system is configured to use.
+winreg = "0.52"

@@ -119,14 +119,30 @@ async fn serve_inner(
     let provider = provider_config(route.provider, route.model);
 
     let usage = Arc::new(Mutex::new(None));
-    let primary = upstream::stream(UpstreamCall {
+    let mut primary = upstream::stream(UpstreamCall {
         client: state.http.clone(),
-        config: provider,
+        config: provider.clone(),
         request: request.clone(),
         model: upstream_model.clone(),
         key_start: state.next_key_start(),
     })
     .await;
+
+    // A connection that fails directly may still get through the proxy Windows is
+    // configured to use. That proxy is deliberately ignored everywhere else: making it
+    // the default would route domestic upstreams through whatever tunnel happens to run.
+    if matches!(&primary, Err(Error::Http(_))) && !crate::proxy::from_env() {
+        if let Some(client) = state.client_via_system_proxy() {
+            primary = upstream::stream(UpstreamCall {
+                client,
+                config: provider,
+                request: request.clone(),
+                model: upstream_model.clone(),
+                key_start: state.next_key_start(),
+            })
+            .await;
+        }
+    }
 
     let attempted = match primary {
         Ok(events) => Ok(events),
@@ -146,6 +162,15 @@ async fn serve_inner(
     let events = match attempted {
         Ok(events) => events,
         Err(error) => {
+            // A 5xx means nothing answered usefully — a dead route, a proxy that is not
+            // running, an upstream that fell over. That is the operator's problem to fix,
+            // not the request's, so it goes where they will see it. Refusals (401/403/429)
+            // stay quiet: another provider already had its chance, and the log has them.
+            if error.http_status() >= 500 {
+                crate::notify::network_problem(
+                    "无法连接上游，请检查网络连接或代理设置。网关会在恢复后自动重试。",
+                );
+            }
             state
                 .log
                 .record(Record {
