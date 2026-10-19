@@ -546,3 +546,82 @@ async fn a_refusing_provider_falls_over_to_another() {
     assert_eq!(response.status(), 200);
     assert_eq!(backup.last_request()["model"], "backup-model");
 }
+
+/// "Working but slow" never returns an error, so only a clock can tell it apart from a
+/// provider that is thinking. The gateway abandons the route and answers elsewhere.
+#[tokio::test]
+async fn a_stalling_route_is_abandoned_for_another_provider() {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+    use common::{serve_app, temp_config_path};
+    use gateway_core::config::{Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    let slow = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            ([(CONTENT_TYPE, "text/event-stream")], TEXT_AND_TOOL_SSE).into_response()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, slow).await.unwrap() });
+
+    let backup = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+
+    let model = |alias: &str, upstream: &str| ProviderModel {
+        id: upstream.into(),
+        alias: alias.into(),
+        upstream_model: upstream.into(),
+        enabled: true,
+        max_output_tokens: None,
+        max_tokens_field: MaxTokensField::default(),
+        extra: Default::default(),
+    };
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        failover: true,
+        slow_after_ms: 300,
+        providers: vec![
+            Provider {
+                id: "slow".into(),
+                name: "slow".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: format!("http://{slow_address}"),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("test-model", "slow-model")],
+            },
+            Provider {
+                id: "backup".into(),
+                name: "backup".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: backup.base_url.clone(),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("backup-model", "backup-model")],
+            },
+        ],
+        ..Config::default()
+    };
+    let gateway = serve_app(config, temp_config_path()).await;
+
+    let started = Instant::now();
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), 200);
+    assert_eq!(backup.last_request()["model"], "backup-model");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the stalled route should have been abandoned, took {elapsed:?}"
+    );
+}

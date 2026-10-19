@@ -1,8 +1,9 @@
 //! Holds the gateway's shared state.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use gateway_core::config::{self, Config};
@@ -37,6 +38,8 @@ pub struct AppState {
     key_cursor: AtomicUsize,
     /// Built on the first connection failure, if the system has a proxy configured.
     proxy_client: OnceLock<reqwest::Client>,
+    /// Routes that recently took too long to answer, and when they may be tried again.
+    slow_routes: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl AppState {
@@ -55,7 +58,35 @@ impl AppState {
             snapshot: RwLock::new(Arc::new(Snapshot::new(config))),
             key_cursor: AtomicUsize::new(0),
             proxy_client: OnceLock::new(),
+            slow_routes: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Whether this route answered too slowly recently enough to avoid it.
+    pub fn is_slow(&self, route: &str) -> bool {
+        let mut slow = self
+            .slow_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match slow.get(route) {
+            Some(until) if *until > std::time::Instant::now() => true,
+            Some(_) => {
+                slow.remove(route);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Keeps this route out of the way for a while after it stalled.
+    pub fn mark_slow(&self, route: &str) {
+        self.slow_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                route.to_owned(),
+                std::time::Instant::now() + SLOW_ROUTE_COOLDOWN,
+            );
     }
 
     /// A client that reaches the internet through the system proxy, built once.
@@ -109,6 +140,9 @@ impl AppState {
         Ok(())
     }
 }
+
+/// How long a route stays avoided after it misses the first-byte deadline.
+const SLOW_ROUTE_COOLDOWN: Duration = Duration::from_secs(120);
 
 /// The one place an upstream HTTP client is configured.
 fn build_client(proxy: Option<&str>) -> reqwest::Result<reqwest::Client> {

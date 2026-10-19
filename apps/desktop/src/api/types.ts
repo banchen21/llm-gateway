@@ -75,6 +75,8 @@ export interface GatewayConfig {
   default_provider_id: string | null
   /** When a provider refuses (quota, credential, plan), try the other enabled ones. */
   failover: boolean
+  /** Answer elsewhere when the first byte takes longer than this; 0 disables it. */
+  slow_after_ms: number
 }
 
 export interface ConfigEnvelope {
@@ -163,6 +165,7 @@ export function emptyConfig(): GatewayConfig {
     providers: [],
     default_provider_id: null,
     failover: false,
+    slow_after_ms: 0,
   }
 }
 

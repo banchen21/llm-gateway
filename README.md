@@ -46,6 +46,9 @@ see what actually happened.
   names by hand.
 - **Automatic failover.** When the provider an alias names refuses (quota, credential,
   plan), the other enabled providers are tried in order and the log records who answered.
+- **Stall detection.** A route that has not produced its first byte within a configurable
+  deadline is abandoned, marked slow for two minutes, and the request answers elsewhere —
+  "working but 14 seconds" never errors, so only a clock can catch it.
 - **A speed test page.** One click runs every alias through the same fixed prompt and
   reports first-byte latency, total time and tokens per second.
 

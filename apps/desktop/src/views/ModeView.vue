@@ -39,6 +39,10 @@ async function refresh() {
   }
 }
 
+function toggleSlow(enabled: boolean) {
+  config.slow_after_ms = enabled ? 5000 : 0
+}
+
 function isLoopback(bind: string): boolean {
   const value = bind.trim()
   return value === 'localhost' || value === '127.0.0.1' || value === '::1'
@@ -210,6 +214,26 @@ async function copy(text: string) {
       <p class="gw-hint">
         当别名指向的供应商返回 429（额度）、401（密钥）或 403（套餐）时，按「供应商」页里的顺序尝试其他已启用的供应商，
         并用它们的第一个模型顶替。请求日志会记录实际应答的供应商与模型。
+      </p>
+
+      <el-divider />
+
+      <div class="failover">
+        <el-switch :model-value="config.slow_after_ms > 0" @update:model-value="toggleSlow" />
+        <span class="failover-label">慢请求自动切换</span>
+        <el-input-number
+          v-if="config.slow_after_ms > 0"
+          v-model="config.slow_after_ms"
+          :min="1000"
+          :max="120000"
+          :step="1000"
+          size="small"
+        />
+        <span v-if="config.slow_after_ms > 0" class="gw-hint">毫秒内没有首字节就换一个供应商</span>
+      </div>
+      <p class="gw-hint">
+        「能连上但很慢」不会报错，只有时钟能发现。超过这个时间仍没有首字节时，网关放弃这次调用、
+        把该路由标记为缓慢两分钟，并改用其他供应商；期间新请求会直接绕开它。设为 0 关闭。
       </p>
     </el-card>
   </div>

@@ -56,6 +56,12 @@ pub struct Config {
     /// When the provider an alias names refuses the request (quota, credential, plan),
     /// try the other enabled providers before failing the call.
     pub failover: bool,
+    /// Abandon a call that has not produced its first byte within this many
+    /// milliseconds, mark the route slow, and answer through another provider.
+    ///
+    /// Zero disables it. This is what turns "working but 14 seconds" into "working":
+    /// a provider that is merely slow never fails, so failover alone never sees it.
+    pub slow_after_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
