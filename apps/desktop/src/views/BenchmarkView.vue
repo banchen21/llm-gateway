@@ -39,7 +39,7 @@ const runsPerAlias = ref(1)
 const apiKey = ref('')
 const running = ref(false)
 const results = ref<AliasResult[]>([])
-const current = ref('')
+const completed = ref(0)
 
 function median(values: number[]): number | null {
   if (!values.length) return null
@@ -144,30 +144,33 @@ async function start() {
     return
   }
   running.value = true
+  completed.value = 0
   results.value = aliases.value.map((alias) => ({ alias, runs: [] }))
   try {
-    for (let position = 0; position < results.value.length; position += 1) {
-      const entry = results.value[position]!
-      current.value = `${entry.alias}（${position + 1}/${results.value.length}）`
-      for (let index = 1; index <= runsPerAlias.value; index += 1) {
-        try {
-          entry.runs.push(await runOne(entry.alias, index))
-        } catch (problem) {
-          entry.runs.push({
-            index,
-            ok: false,
-            status: 0,
-            ttfb: 0,
-            total: 0,
-            outputTokens: null,
-            error: problem instanceof Error ? problem.message : String(problem),
-          })
+    // Every alias goes out at once: comparing them one after another would let a slow
+    // first alias delay the rest and make the total run far longer than the test itself.
+    await Promise.all(
+      results.value.map(async (entry) => {
+        for (let index = 1; index <= runsPerAlias.value; index += 1) {
+          try {
+            entry.runs.push(await runOne(entry.alias, index))
+          } catch (problem) {
+            entry.runs.push({
+              index,
+              ok: false,
+              status: 0,
+              ttfb: 0,
+              total: 0,
+              outputTokens: null,
+              error: problem instanceof Error ? problem.message : String(problem),
+            })
+          }
         }
-      }
-    }
+        completed.value += 1
+      }),
+    )
   } finally {
     running.value = false
-    current.value = ''
   }
 }
 </script>
@@ -178,11 +181,11 @@ async function start() {
       <template #header><span class="card-title">测试配置</span></template>
       <el-form label-width="112px" label-position="left" size="small" class="form">
         <el-form-item label="测试对象">
-          <span class="gw-hint">全部 {{ aliases.length }} 个别名，依次各测一次。</span>
+          <span class="gw-hint">全部 {{ aliases.length }} 个别名，同时发送。</span>
         </el-form-item>
         <el-form-item label="每个别名次数">
           <el-input-number v-model="runsPerAlias" :min="1" :max="5" size="small" />
-          <span class="gw-hint inline-hint">顺序发送，不并发。</span>
+          <span class="gw-hint inline-hint">同一个别名的多次请求顺序发送。</span>
         </el-form-item>
         <el-form-item label="入站密钥">
           <el-input
@@ -199,7 +202,9 @@ async function start() {
           <el-button type="primary" :icon="VideoPlay" :loading="running" @click="start">
             开始测试
           </el-button>
-          <span v-if="running" class="gw-hint inline-hint">正在测试 {{ current }}…</span>
+          <span v-if="running" class="gw-hint inline-hint">
+            已完成 {{ completed }}/{{ results.length }} 个别名…
+          </span>
         </el-form-item>
       </el-form>
     </el-card>
