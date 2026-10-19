@@ -206,19 +206,21 @@ configuration clears the rest. The GUI always sends the complete document.
 
 ## Proxies
 
-The gateway connects **directly** by default. It reads proxy settings from the environment
-(`ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` and their lowercase forms, with `NO_PROXY`
-respected), and treats the operating system's proxy as a rescue path rather than a default:
+The gateway keeps two paths to the internet — direct, and the proxy Windows is configured
+to use — and **prefers whichever has been faster lately**. Each path carries a decaying
+average of how long it took to produce its first byte (a failure counts as a long stall).
+Direct wins ties and starts as the default; the proxy takes over only once it has two
+samples and is a clear 15% ahead, or when direct has failed. Every tenth request still
+probes direct, so a network that changed underneath the numbers can win the preference
+back.
 
-1. The direct connection is tried first.
-2. If it fails, the gateway retries once through the system proxy (read from the Windows
-   registry), building a separate client for it.
-3. If that fails too, it posts a Windows notification — at most once every ten minutes —
-   saying the network or proxy needs attention, and the request log records the failure.
+`ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` are read from the environment (with `NO_PROXY`
+respected) and are used as-is; the system proxy is the second path. `GET /admin/health`
+reports `proxy_from_env`, `system_proxy_available` and `preferred_path`, and the mode page
+shows the current preference.
 
-`GET /admin/health` reports `proxy_from_env` and `system_proxy_available`, and the mode page
-shows which of the two is in effect, so a proxy that disappears is visible instead of
-looking like a dead provider.
+If both paths fail, the gateway posts a Windows notification — at most once every ten
+minutes — saying the network or proxy needs attention, and the request log records it.
 
 ## The GUI
 
