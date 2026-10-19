@@ -625,3 +625,19 @@ async fn a_stalling_route_is_abandoned_for_another_provider() {
         "the stalled route should have been abandoned, took {elapsed:?}"
     );
 }
+
+/// A fallback or a stall can move a request to a provider the client never asked for, so
+/// the answer says who actually served it.
+#[tokio::test]
+async fn the_response_names_the_provider_that_answered() {
+    let upstream = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+    let gateway = start_gateway(&upstream, ProviderProtocol::Anthropic).await;
+
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-llm-gateway-provider"], "mock");
+    assert_eq!(
+        response.headers()["x-llm-gateway-upstream"],
+        "upstream-model"
+    );
+}

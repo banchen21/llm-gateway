@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header::HeaderValue, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
@@ -277,8 +277,8 @@ async fn serve_inner(
             .log
             .record(Record {
                 alias,
-                provider: provider_name,
-                upstream_model,
+                provider: provider_name.clone(),
+                upstream_model: upstream_model.clone(),
                 stream: false,
                 prompt,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -287,7 +287,11 @@ async fn serve_inner(
                 },
             })
             .await;
-        return Ok(Json(body).into_response());
+        return Ok(with_route(
+            Json(body).into_response(),
+            &provider_name,
+            &upstream_model,
+        ));
     }
 
     let frames: Pin<Box<dyn Stream<Item = gateway_core::Result<String>> + Send>> = match protocol {
@@ -297,6 +301,9 @@ async fn serve_inner(
     // A streamed request is recorded once its last frame has been produced, which is the
     // only point at which the upstream's usage is known.
     let log = state.log.clone();
+    // The stream owns its copies; the originals stay with this frame for the headers.
+    let recorded_provider = provider_name.clone();
+    let recorded_model = upstream_model.clone();
     let frames = async_stream::stream! {
         let mut frames = frames;
         while let Some(frame) = frames.next().await {
@@ -304,8 +311,8 @@ async fn serve_inner(
         }
         log.record(Record {
             alias,
-            provider: provider_name,
-            upstream_model,
+            provider: recorded_provider,
+            upstream_model: recorded_model,
             stream: true,
             prompt,
             duration_ms: started.elapsed().as_millis() as u64,
@@ -313,7 +320,41 @@ async fn serve_inner(
         })
         .await;
     };
-    Ok(sse_response(frames))
+    Ok(with_route(
+        sse_response(frames),
+        &provider_name,
+        &upstream_model,
+    ))
+}
+
+/// Tells the caller which provider and upstream model actually answered.
+///
+/// Aliases can be served by a fallback provider when the configured one refuses or
+/// stalls, so the client cannot infer this from its request. Values are percent-encoded
+/// because provider names are free-form and HTTP headers are not Unicode.
+fn with_route(mut response: Response, provider: &str, model: &str) -> Response {
+    for (name, value) in [
+        ("x-llm-gateway-provider", provider),
+        ("x-llm-gateway-upstream", model),
+    ] {
+        if let Ok(value) = HeaderValue::from_str(&percent_encode(value)) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b' ') {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn sse_response(

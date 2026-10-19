@@ -40,6 +40,9 @@ interface Run {
   ttfb: number
   total: number
   outputTokens: number | null
+  /** Who actually answered, which is not the configured provider during a fallback. */
+  provider: string
+  upstream: string
   error?: string
 }
 
@@ -80,6 +83,8 @@ function formatRate(value: number | null): string {
 
 function summary(entry: AliasResult) {
   const ok = entry.runs.filter((run) => run.ok)
+  const configured = providerByAlias.value.get(entry.alias) ?? ''
+  const answered = ok.find((run) => run.provider)?.provider ?? ''
   return {
     successes: ok.length,
     total: entry.runs.length,
@@ -87,6 +92,9 @@ function summary(entry: AliasResult) {
     duration: median(ok.map((run) => run.total)),
     tokens: median(ok.map((run) => run.outputTokens ?? 0)),
     rate: median(ok.map(rate).filter((value): value is number => value !== null)),
+    provider: answered || configured,
+    fallback: Boolean(configured && answered && answered !== configured),
+    upstream: ok.find((run) => run.upstream)?.upstream ?? '',
   }
 }
 
@@ -114,10 +122,26 @@ async function runOne(alias: string, index: number): Promise<Run> {
     }),
   })
 
+  /** The gateway reports who actually answered, which a fallback makes non-obvious. */
+  const header = (name: string) => {
+    const value = response.headers.get(name)
+    return value ? decodeURIComponent(value) : ''
+  }
+
   if (!response.ok) {
     const text = await response.text()
     const at = performance.now() - started
-    return { index, ok: false, status: response.status, ttfb: at, total: at, outputTokens: null, error: text.slice(0, 300) }
+    return {
+      index,
+      ok: false,
+      status: response.status,
+      ttfb: at,
+      total: at,
+      outputTokens: null,
+      provider: header('x-llm-gateway-provider'),
+      upstream: header('x-llm-gateway-upstream'),
+      error: text.slice(0, 300),
+    }
   }
 
   let ttfb = 0
@@ -148,6 +172,8 @@ async function runOne(alias: string, index: number): Promise<Run> {
     ttfb,
     total: performance.now() - started,
     outputTokens: outputTokens(text),
+    provider: header('x-llm-gateway-provider'),
+    upstream: header('x-llm-gateway-upstream'),
   }
 }
 
@@ -175,6 +201,8 @@ async function start() {
               ttfb: 0,
               total: 0,
               outputTokens: null,
+              provider: '',
+              upstream: '',
               error: problem instanceof Error ? problem.message : String(problem),
             })
           }
@@ -231,14 +259,21 @@ async function start() {
         <el-table-column prop="entry.alias" label="模型别名" min-width="160">
           <template #default="{ row }"><span class="mono">{{ row.entry.alias }}</span></template>
         </el-table-column>
-        <el-table-column label="供应商" min-width="170">
+        <el-table-column label="供应商" min-width="190">
           <template #default="{ row }">
-            <span class="provider">{{ providerByAlias.get(row.entry.alias) ?? '—' }}</span>
+            <span class="provider">{{ row.provider || '—' }}</span>
+            <span v-if="row.fallback" class="fallback" title="配置的供应商没有应答，实际由兜底供应商服务">
+              兜底
+            </span>
+            <div v-if="row.upstream" class="gw-hint mono">{{ row.upstream }}</div>
           </template>
         </el-table-column>
         <el-table-column label="成功" width="80">
           <template #default="{ row }">
-            <span class="status" :class="row.successes === row.total ? 'ok' : 'bad'">
+            <span
+              class="status"
+              :class="row.total === 0 ? 'idle' : row.successes === row.total ? 'ok' : 'bad'"
+            >
               <i class="dot" />{{ row.successes }}/{{ row.total }}
             </span>
           </template>
@@ -332,6 +367,20 @@ async function start() {
 
 .status.bad {
   color: var(--gw-danger);
+}
+
+.status.idle {
+  color: var(--gw-muted);
+}
+
+.fallback {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  line-height: 16px;
+  color: #8a5a1f;
+  background: #fdf3e3;
 }
 
 .strong {
