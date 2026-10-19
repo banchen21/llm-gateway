@@ -6,7 +6,20 @@ import { gatewayBase } from '../api/client'
 import { useGateway } from '../store'
 
 const gateway = useGateway()
-const { aliases } = gateway
+const { aliases, config } = gateway
+
+/** Which provider serves each alias, so a result is readable without cross-referencing. */
+const providerByAlias = computed(() => {
+  const map = new Map<string, string>()
+  for (const provider of config.providers) {
+    if (!provider.enabled) continue
+    for (const model of provider.models) {
+      if (!model.enabled) continue
+      if (!map.has(model.alias)) map.set(model.alias, provider.name)
+    }
+  }
+  return map
+})
 
 /**
  * One fixed prompt for every alias: the same line, the same number of times.
@@ -215,8 +228,13 @@ async function start() {
         还没有结果。点击「开始测试」会依次测完所有别名。
       </div>
       <el-table v-else :data="summaries" size="small">
-        <el-table-column prop="entry.alias" label="模型别名" min-width="170">
+        <el-table-column prop="entry.alias" label="模型别名" min-width="160">
           <template #default="{ row }"><span class="mono">{{ row.entry.alias }}</span></template>
+        </el-table-column>
+        <el-table-column label="供应商" min-width="170">
+          <template #default="{ row }">
+            <span class="provider">{{ providerByAlias.get(row.entry.alias) ?? '—' }}</span>
+          </template>
         </el-table-column>
         <el-table-column label="成功" width="80">
           <template #default="{ row }">
@@ -267,6 +285,10 @@ async function start() {
 
 .card-title {
   font-weight: 600;
+}
+
+.provider {
+  color: var(--gw-slate);
 }
 
 .form {
