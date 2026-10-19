@@ -47,6 +47,10 @@ pub fn from_env() -> bool {
 }
 
 /// Turns the registry's proxy string into a URL, or `None` when it names no HTTP proxy.
+///
+/// Only the Windows build calls this; the tests below exercise it everywhere, so the
+/// parsing stays covered on CI's Linux runner too.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse(server: &str) -> Option<String> {
     let server = server.trim();
     if server.is_empty() {
