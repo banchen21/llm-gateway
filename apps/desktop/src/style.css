@@ -13,6 +13,18 @@
   --gw-danger-tint: #faeceb;
   --gw-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, monospace;
 
+  /* Element Plus derives its states from these, so recolouring the accent here keeps
+     buttons, switches and links on the same green as the rest of the panel. */
+  --el-color-primary: #2f6f5e;
+  --el-color-primary-dark-2: #265a4b;
+  --el-color-primary-light-3: #5b8f81;
+  --el-color-primary-light-5: #86ada2;
+  --el-color-primary-light-7: #b0cac3;
+  --el-color-primary-light-8: #c5d7d1;
+  --el-color-primary-light-9: #e9f1ee;
+  --el-color-danger: #b0453b;
+  --el-color-danger-light-9: #faeceb;
+
   color-scheme: light;
 }
 

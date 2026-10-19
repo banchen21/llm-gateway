@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, Grid, Reading, Refresh, Setting } from '@element-plus/icons-vue'
+import { Document, Grid, Odometer, Reading, Refresh, Setting } from '@element-plus/icons-vue'
 import { fetchHealth, getToken, setToken, type Health } from './api/client'
 import { useGateway } from './store'
 import { PROTOCOL_MODE_LABELS } from './api/types'
@@ -85,6 +85,10 @@ function applyToken() {
         <el-menu-item index="/logs">
           <el-icon><Document /></el-icon>
           <span>请求记录</span>
+        </el-menu-item>
+        <el-menu-item index="/benchmark">
+          <el-icon><Odometer /></el-icon>
+          <span>测试速率</span>
         </el-menu-item>
         <el-menu-item index="/guide">
           <el-icon><Reading /></el-icon>

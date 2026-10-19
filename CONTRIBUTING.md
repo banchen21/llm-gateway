@@ -55,5 +55,6 @@ rather than mocking an HTTP client.
 ## Reporting bugs
 
 Include the request shape (which client, which protocol), what happened, and what you
-expected. The gateway's request log at `<config dir>/logs/requests.jsonl` records model,
-status, token counts and prompt shape — never message bodies — so it is safe to attach.
+expected. The gateway's request log at `<config dir>/logs/requests.db` (SQLite) records
+model, status, token counts and prompt shape — never message bodies — so it is safe to
+attach.

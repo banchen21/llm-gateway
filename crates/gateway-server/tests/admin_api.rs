@@ -753,3 +753,72 @@ async fn the_configuration_response_has_a_stable_shape() {
         );
     }
 }
+
+#[tokio::test]
+async fn clearing_the_log_removes_every_record() {
+    let path = temp_config_path();
+    let gateway = gateway_at(&path).await;
+    put_config(
+        &gateway,
+        json!({"providers": [{
+            "id": "p1", "name": "dead", "protocol": "anthropic",
+            "base_url": "http://127.0.0.1:1", "api_key": "k", "enabled": true,
+            "models": [{"id": "m1", "alias": "test-model", "upstream_model": "u", "enabled": true}]
+        }]}),
+    )
+    .await;
+    post_messages(&gateway, &messages_body("test-model", false)).await;
+    wait_for_entries(&gateway, 1).await;
+
+    let cleared = reqwest::Client::new()
+        .delete(format!("{gateway}/admin/logs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), 200);
+    let value: Value = cleared.json().await.unwrap();
+    assert_eq!(value["cleared"], 1);
+
+    let after: Value = reqwest::get(format!("{gateway}/admin/logs"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(after["entries"].as_array().unwrap().is_empty());
+}
+
+/// The GUI fills its model table from whatever the endpoint reports, deduplicated.
+#[tokio::test]
+async fn the_upstream_model_list_is_fetched_for_the_gui() {
+    use axum::routing::get;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    let app = Router::new().route(
+        "/v1/models",
+        get(|| async {
+            axum::Json(json!({"data": [{"id": "zeta"}, {"id": "alpha"}, {"id": "alpha"}]}))
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let path = temp_config_path();
+    let gateway = gateway_at(&path).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/admin/provider-models"))
+        .json(&json!({
+            "protocol": "open_ai",
+            "base_url": format!("http://{address}"),
+            "api_key": "k"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["models"], json!(["alpha", "zeta"]));
+}

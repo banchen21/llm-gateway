@@ -34,7 +34,11 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/admin/config",
             get(api::admin::get_config).put(api::admin::put_config),
         )
-        .route("/admin/logs", get(api::admin::logs))
+        .route(
+            "/admin/logs",
+            get(api::admin::logs).delete(api::admin::clear_logs),
+        )
+        .route("/admin/provider-models", post(api::admin::provider_models))
         // Everything else is a request for the GUI, which is served only when enabled.
         .fallback(gui)
         .layer(TraceLayer::new_for_http())

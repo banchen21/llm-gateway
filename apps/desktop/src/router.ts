@@ -25,6 +25,11 @@ export const router = createRouter({
       meta: { title: '请求记录' },
     },
     {
+      path: '/benchmark',
+      component: () => import('./views/BenchmarkView.vue'),
+      meta: { title: '测试速率' },
+    },
+    {
       path: '/guide',
       component: () => import('./views/GuideView.vue'),
       meta: { title: '使用说明' },

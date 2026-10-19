@@ -60,7 +60,7 @@ impl AppState {
         let log = RequestLog::new(
             config_path
                 .parent()
-                .map(|directory| directory.join("logs").join("requests.jsonl")),
+                .map(|directory| directory.join("logs").join("requests.db")),
         );
         Ok(Arc::new(AppState {
             http,

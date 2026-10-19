@@ -160,3 +160,113 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
     }))
     .into_response()
 }
+
+/// Empties the request log.
+pub async fn clear_logs(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&state, &headers) {
+        return openai_error(error);
+    }
+    let cleared = state.log.clear().await;
+    Json(json!({"cleared": cleared})).into_response()
+}
+
+/// The provider fields a model listing needs, which may be unsaved drafts from the GUI.
+#[derive(Deserialize)]
+pub struct ProviderProbe {
+    pub protocol: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_keys: Vec<gateway_core::config::ApiKey>,
+    #[serde(default)]
+    pub custom_headers: std::collections::BTreeMap<String, String>,
+}
+
+/// Asks the upstream endpoint which models it serves.
+///
+/// The one call every compatible endpoint answers, which is what makes it the cheapest
+/// way to fill the model table without typing names by hand.
+pub async fn provider_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(probe): Json<ProviderProbe>,
+) -> Response {
+    if let Err(error) = authorize(&state, &headers) {
+        return openai_error(error);
+    }
+    let keys: Vec<String> = std::iter::once(probe.api_key.as_str())
+        .chain(probe.api_keys.iter().map(|key| key.key.as_str()))
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    if keys.is_empty() {
+        return openai_error(Error::bad_request(
+            "fill in an API key before fetching models",
+        ));
+    }
+    if probe.base_url.trim().is_empty() {
+        return openai_error(Error::bad_request("fill in a base URL first"));
+    }
+
+    let url = format!("{}/v1/models", probe.base_url.trim_end_matches('/'));
+    let anthropic = probe.protocol == "anthropic";
+    let response = match gateway_core::upstream::send_with_keys(&keys, 0, |key| {
+        // A model listing is a convenience, not a request worth waiting minutes for.
+        let mut request = state
+            .http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(30));
+        request = if anthropic {
+            request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        } else {
+            request.bearer_auth(key)
+        };
+        for (name, value) in &probe.custom_headers {
+            request = request.header(name, value);
+        }
+        request
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return openai_error(error),
+    };
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message: String = body.chars().take(500).collect();
+        return openai_error(Error::upstream(status, message));
+    }
+
+    let value: serde_json::Value = match response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return openai_error(Error::upstream(
+                reqwest::StatusCode::BAD_GATEWAY,
+                format!("the model list was not JSON: {error}"),
+            ))
+        }
+    };
+
+    // Both protocols answer with {"data":[{"id": …}]}; a bare array is accepted too.
+    let list = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array());
+    let mut models: Vec<String> = list
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models.dedup();
+    Json(json!({"models": models})).into_response()
+}

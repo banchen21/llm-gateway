@@ -29,8 +29,10 @@
 - **一个供应商多个密钥。** 不同账号的额度互相独立；请求会在密钥间轮转，遇到 429、401、403 自动换下一个。
 - **图形界面，窗口或浏览器。** 同一套界面既跑在桌面窗口里，也跑在网关端口上。
 - **命名的入站密钥。** 一个客户端一把，可单独吊销。
-- **看得懂的请求日志。** 每次调用的模型、供应商、状态、耗时和 token 数——不记录消息正文。
+- **存在 SQLite 里的请求日志。** 每次调用的模型、供应商、状态、耗时和 token 数——不记录消息正文——并显示输入里命中缓存的比例，支持一键清除。
 - **协议模式。** 只开 Anthropic、只开 OpenAI，或两个都开；切换无需重启。
+- **从上游获取模型。** 一次调用填满模型表格，不用手敲名字。
+- **测速页。** 对选定的别名连发 N 次，逐次显示首字节与总时，并给出中位数。
 
 ## 快速开始
 
@@ -84,7 +86,9 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `POST /v1/chat/completions` | `primary_open_ai`、`route` |
 | `GET /v1/models` | 始终可用 |
 | `GET /admin/config`、`PUT /admin/config` | 始终可用 |
-| `GET /admin/logs`、`GET /admin/health` | 始终可用 |
+| `GET /admin/logs`、`DELETE /admin/logs` | 始终可用 |
+| `GET /admin/health` | 始终可用 |
+| `POST /admin/provider-models` | 始终可用 |
 | `GET /`（界面） | Web 界面启用时 |
 
 认证接受 `x-api-key` 或 `Authorization: Bearer`。没有配置密钥时网关放行一切，这正是各类

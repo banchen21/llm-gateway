@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { ElMessageBox } from 'element-plus'
-import { Delete, Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Delete, Download, Plus } from '@element-plus/icons-vue'
+import { fetchProviderModels } from '../api/client'
 import { useGateway } from '../store'
 import {
   emptyModel,
@@ -63,6 +64,48 @@ async function removeProvider(index: number) {
     config.default_provider_id = null
   }
   config.providers.splice(index, 1)
+}
+
+/** The upstream model picker, shared by every provider card. */
+const modelDialog = reactive({
+  open: false,
+  loading: false,
+  provider: null as Provider | null,
+  models: [] as string[],
+  picked: [] as string[],
+})
+
+async function openModelFetch(provider: Provider) {
+  modelDialog.provider = provider
+  modelDialog.models = []
+  modelDialog.picked = []
+  modelDialog.open = true
+  modelDialog.loading = true
+  try {
+    const { models } = await fetchProviderModels(provider)
+    modelDialog.models = models
+    // Models the provider already lists stay unchecked; fetching again is additive.
+    const known = new Set(provider.models.map((model) => model.upstream_model))
+    modelDialog.picked = models.filter((id) => !known.has(id))
+  } catch (problem) {
+    modelDialog.open = false
+    ElMessage.error(problem instanceof Error ? problem.message : String(problem))
+  } finally {
+    modelDialog.loading = false
+  }
+}
+
+function addPickedModels() {
+  const provider = modelDialog.provider
+  if (!provider) return
+  for (const id of modelDialog.picked) {
+    const model = emptyModel()
+    model.alias = id
+    model.upstream_model = id
+    provider.models.push(model)
+  }
+  ElMessage.success(`已添加 ${modelDialog.picked.length} 个模型`)
+  modelDialog.open = false
 }
 
 function headerEntries(provider: Provider) {
@@ -260,6 +303,7 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
           别名是客户端请求时使用的 model 名；上游模型名是这家供应商自己的叫法。
         </span>
         <div class="grow" />
+        <el-button size="small" :icon="Download" @click="openModelFetch(provider)">获取模型</el-button>
         <el-button size="small" :icon="Plus" @click="provider.models.push(emptyModel())">
           添加模型
         </el-button>
@@ -352,6 +396,30 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
         <el-button size="small" type="primary" @click="confirmExtra">确定</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="modelDialog.open" title="从上游获取模型" width="520px">
+      <div v-if="modelDialog.loading" class="gw-hint">正在请求上游的模型列表…</div>
+      <template v-else>
+        <div v-if="modelDialog.models.length" class="model-picks">
+          <el-checkbox-group v-model="modelDialog.picked">
+            <el-checkbox v-for="id in modelDialog.models" :key="id" :value="id">{{ id }}</el-checkbox>
+          </el-checkbox-group>
+        </div>
+        <div v-else class="gw-empty">上游没有返回模型。</div>
+        <p class="gw-hint dialog-lead">别名默认与上游模型名相同，添加后可以再改。</p>
+      </template>
+      <template #footer>
+        <el-button size="small" @click="modelDialog.open = false">取消</el-button>
+        <el-button
+          size="small"
+          type="primary"
+          :disabled="!modelDialog.picked.length"
+          @click="addPickedModels"
+        >
+          添加所选（{{ modelDialog.picked.length }}）
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -398,6 +466,19 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
   display: grid;
   grid-template-columns: 180px 1fr auto;
   gap: 8px;
+}
+
+.model-picks {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px 2px;
+}
+
+.model-picks :deep(.el-checkbox) {
+  margin-right: 0;
+  height: 28px;
 }
 
 .models-head {

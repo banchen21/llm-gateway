@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
-import { fetchLogs, type LogEntry } from '../api/client'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Delete, Refresh } from '@element-plus/icons-vue'
+import { clearLogs, fetchLogs, type LogEntry } from '../api/client'
 
 const entries = ref<LogEntry[]>([])
 const loading = ref(false)
@@ -22,6 +23,16 @@ const totals = computed(() => {
   const failures = entries.value.filter((entry) => entry.status >= 400).length
   return { ...usage, failures }
 })
+
+/** Share of the input tokens that came from the upstream's prompt cache. */
+const cacheRate = computed(() => {
+  if (!totals.value.input) return null
+  return (totals.value.cached / totals.value.input) * 100
+})
+
+function formatRate(rate: number | null): string {
+  return rate === null ? '—' : `${rate.toFixed(1)}%`
+}
 
 onMounted(refresh)
 onUnmounted(stopAutoRefresh)
@@ -66,6 +77,25 @@ function formatTokens(count: number): string {
 function rowClass({ row }: { row: LogEntry }): string {
   return row.status >= 400 ? 'failed' : ''
 }
+
+async function clearRecords() {
+  try {
+    await ElMessageBox.confirm(
+      '清除后无法恢复，只影响请求记录，不影响配置。',
+      '清除请求记录',
+      { type: 'warning', confirmButtonText: '清除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const { cleared } = await clearLogs()
+    ElMessage.success(`已清除 ${cleared} 条记录`)
+    await refresh()
+  } catch (problem) {
+    ElMessage.error(problem instanceof Error ? problem.message : String(problem))
+  }
+}
 </script>
 
 <template>
@@ -82,6 +112,7 @@ function rowClass({ row }: { row: LogEntry }): string {
       />
       <span class="gw-hint">自动刷新</span>
       <el-button :icon="Refresh" size="small" :loading="loading" @click="refresh">刷新</el-button>
+      <el-button :icon="Delete" size="small" text @click="clearRecords">清除记录</el-button>
     </div>
 
     <el-alert
@@ -114,6 +145,7 @@ function rowClass({ row }: { row: LogEntry }): string {
       <div class="metric">
         <span class="gw-micro">命中缓存</span>
         <span class="value mono">{{ formatTokens(totals.cached) }}</span>
+        <span class="sub">命中率 {{ formatRate(cacheRate) }}</span>
       </div>
     </div>
 
@@ -250,6 +282,11 @@ function rowClass({ row }: { row: LogEntry }): string {
 
 .value.bad {
   color: var(--gw-danger);
+}
+
+.sub {
+  font-size: 11px;
+  color: var(--gw-muted);
 }
 
 .time {

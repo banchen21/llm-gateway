@@ -6,7 +6,7 @@
  * protocol cannot reach the gateway by a relative path). The desktop shell injects
  * `__LLM_GATEWAY_BASE__` to cover the last case; the other two work with a relative path.
  */
-import type { ConfigEnvelope, GatewayConfig, Health, LogEntry } from './types'
+import type { ConfigEnvelope, GatewayConfig, Health, LogEntry, Provider } from './types'
 
 export type { ConfigEnvelope, GatewayConfig, Health, LogEntry } from './types'
 
@@ -20,6 +20,11 @@ const TOKEN_KEY = 'llm-gateway-token'
 
 function base(): string {
   return window.__LLM_GATEWAY_BASE__ ?? ''
+}
+
+/** The gateway origin, for pages that call the inference endpoints directly. */
+export function gatewayBase(): string {
+  return base()
 }
 
 export function getToken(): string {
@@ -91,4 +96,27 @@ export function fetchHealth(): Promise<Health> {
 
 export function fetchLogs(limit = 200): Promise<{ entries: LogEntry[] }> {
   return request<{ entries: LogEntry[] }>(`/admin/logs?limit=${limit}`)
+}
+
+/** Empties the request log and reports how many records went. */
+export function clearLogs(): Promise<{ cleared: number }> {
+  return request<{ cleared: number }>('/admin/logs', { method: 'DELETE' })
+}
+
+/**
+ * Asks the upstream endpoint which models it serves.
+ *
+ * The provider document is sent as it stands in the editor, so it works before saving.
+ */
+export function fetchProviderModels(provider: Provider): Promise<{ models: string[] }> {
+  return request<{ models: string[] }>('/admin/provider-models', {
+    method: 'POST',
+    body: JSON.stringify({
+      protocol: provider.protocol,
+      base_url: provider.base_url,
+      api_key: provider.api_key,
+      api_keys: provider.api_keys,
+      custom_headers: provider.custom_headers,
+    }),
+  })
 }

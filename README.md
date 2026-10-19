@@ -37,10 +37,15 @@ see what actually happened.
 - **A GUI, in a window or in a browser.** The same interface runs as a desktop window and
   as a page on the gateway's port.
 - **Named inbound keys.** Issue one key per client and revoke them independently.
-- **A request log you can read.** Model, provider, status, duration and token counts for
-  every call — never message bodies.
+- **A request log in SQLite.** Model, provider, status, duration and token counts for
+  every call — never message bodies — plus the share of input that came from the upstream's
+  cache, and a one-click clear.
 - **Protocol modes.** Expose the Anthropic API, the OpenAI API, or both; switching takes
   effect without a restart.
+- **Fetch models from the upstream.** One call fills the model table instead of typing
+  names by hand.
+- **A speed test page.** Send N requests through a chosen alias and see first-byte and
+  total time per run, with medians.
 
 ## Quick start
 
@@ -96,7 +101,9 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `POST /v1/chat/completions` | `primary_open_ai`, `route` |
 | `GET /v1/models` | always |
 | `GET /admin/config`, `PUT /admin/config` | always |
-| `GET /admin/logs`, `GET /admin/health` | always |
+| `GET /admin/logs`, `DELETE /admin/logs` | always |
+| `GET /admin/health` | always |
+| `POST /admin/provider-models` | always |
 | `GET /` (the GUI) | when the web GUI is enabled |
 
 Authentication accepts either `x-api-key` or `Authorization: Bearer`. With no key
