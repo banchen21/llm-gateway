@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Delete, Refresh } from '@element-plus/icons-vue'
 import { clearLogs, fetchLogs, type LogEntry } from '../api/client'
 
 const entries = ref<LogEntry[]>([])
+const table = ref<TableInstance>()
 const loading = ref(false)
 const autoRefresh = ref(false)
 const error = ref('')
@@ -76,6 +77,18 @@ function formatTokens(count: number): string {
 /** Failed calls carry a coloured rail on the left edge, so they scan without reading. */
 function rowClass({ row }: { row: LogEntry }): string {
   return row.status >= 400 ? 'failed' : ''
+}
+
+/**
+ * The whole row toggles its detail, not just the arrow.
+ *
+ * A click on the arrow is ignored here because the table already handles it; without the
+ * guard the two would cancel each other out.
+ */
+function toggleRow(row: LogEntry, _column: unknown, event: Event) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('.el-table__expand-icon')) return
+  table.value?.toggleRowExpansion(row)
 }
 
 async function clearRecords() {
@@ -153,7 +166,15 @@ async function clearRecords() {
       还没有请求记录。配置好供应商后，用 Anthropic 或 OpenAI 客户端向网关发一次请求就会出现。
     </div>
 
-    <el-table v-else :data="entries" size="small" max-height="620" :row-class-name="rowClass">
+    <el-table
+      v-else
+      ref="table"
+      :data="entries"
+      size="small"
+      max-height="620"
+      :row-class-name="rowClass"
+      @row-click="toggleRow"
+    >
       <el-table-column label="时间" width="158">
         <template #default="{ row }">
           <span class="mono time">{{ timestamp(row.at) }}</span>
@@ -344,6 +365,10 @@ async function clearRecords() {
 }
 
 /* The failure rail: a 3px mark on the row's leading edge. */
+:deep(.el-table__row) {
+  cursor: pointer;
+}
+
 :deep(.el-table__row.failed td:first-child) {
   box-shadow: inset 3px 0 0 var(--gw-danger);
 }
