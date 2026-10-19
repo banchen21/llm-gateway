@@ -10,7 +10,7 @@ use eventsource_stream::Eventsource;
 use futures_util::{pin_mut, Stream, StreamExt};
 use serde_json::{json, Map, Value};
 
-use super::{send_replaying, UpstreamCall};
+use super::{send_with_keys, UpstreamCall};
 use crate::ir::{
     normalized_tool_call_id, synthetic_tool_call_id, ChatRequest, ContentPart, EventStream,
     FinishReason, ModelEvent, Role, ToolChoice, Usage,
@@ -24,11 +24,11 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 
 pub async fn stream(call: UpstreamCall) -> Result<EventStream> {
     let body = request_body(&call)?;
-    let response = send_replaying(|| {
+    let response = send_with_keys(&call.config.api_keys, call.key_start, |key| {
         let mut request = call
             .client
             .post(call.config.endpoint("/v1/chat/completions"))
-            .bearer_auth(&call.config.api_key)
+            .bearer_auth(key)
             .json(&body);
         for (name, value) in &call.config.custom_headers {
             request = request.header(name, value);

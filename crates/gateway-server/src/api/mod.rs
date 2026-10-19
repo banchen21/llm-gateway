@@ -123,6 +123,7 @@ async fn serve_inner(
         config: provider,
         request,
         model: upstream_model.clone(),
+        key_start: state.next_key_start(),
     })
     .await
     {
@@ -259,12 +260,23 @@ pub fn provider_config(provider: &Provider, model: &ProviderModel) -> ProviderCo
     ProviderConfig {
         protocol: provider.protocol,
         base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
+        api_keys: provider_keys(provider),
         custom_headers: provider.custom_headers.clone(),
         max_output_tokens: model.max_output_tokens,
         max_tokens_field: model.max_tokens_field,
         extra: model.extra.clone(),
     }
+}
+
+/// Every key the provider can authenticate with, the legacy single key first.
+///
+/// Blank entries are dropped: a row the GUI left empty must not be sent as a credential.
+pub fn provider_keys(provider: &Provider) -> Vec<String> {
+    std::iter::once(provider.api_key.as_str())
+        .chain(provider.api_keys.iter().map(|key| key.key.as_str()))
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Renders an error in the Anthropic error envelope.

@@ -204,6 +204,30 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
           <el-input v-model="provider.api_key" type="password" show-password placeholder="上游密钥" />
         </el-form-item>
 
+        <el-form-item label="备用密钥">
+          <div class="keys">
+            <div v-for="(entry, keyIndex) in provider.api_keys" :key="keyIndex" class="key-row">
+              <el-input v-model="entry.name" size="small" placeholder="用途（可选）" />
+              <el-input v-model="entry.key" size="small" type="password" show-password placeholder="密钥" />
+              <el-button
+                text
+                size="small"
+                type="danger"
+                :icon="Delete"
+                @click="provider.api_keys.splice(keyIndex, 1)"
+              >
+                删除
+              </el-button>
+            </div>
+            <el-button text size="small" :icon="Plus" @click="provider.api_keys.push({ id: '', name: '', key: '' })">
+              添加密钥
+            </el-button>
+            <div class="gw-hint">
+              同一个供应商的多个账号轮流使用；某个 key 被限流（429）或被拒（401/403）时自动换下一个。
+            </div>
+          </div>
+        </el-form-item>
+
         <el-form-item label="自定义请求头">
           <div class="headers">
             <div v-for="([key, value], headerIndex) in headerEntries(provider)" :key="headerIndex" class="header-row">
@@ -360,6 +384,19 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
 .header-row {
   display: grid;
   grid-template-columns: 220px 1fr auto;
+  gap: 8px;
+}
+
+.keys {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.key-row {
+  display: grid;
+  grid-template-columns: 180px 1fr auto;
   gap: 8px;
 }
 

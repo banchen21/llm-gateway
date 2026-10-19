@@ -111,6 +111,11 @@ pub struct Provider {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
+    /// Additional keys for the same endpoint, tried in turn when one is rate limited
+    /// or rejected. Accounts sold separately each carry their own quota, so rotating
+    /// across them is what keeps a plan-wide limit from stopping every request.
+    #[serde(default)]
+    pub api_keys: Vec<ApiKey>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     #[serde(default)]

@@ -1,6 +1,7 @@
 //! Holds the gateway's shared state.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -31,6 +32,9 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub log: RequestLog,
     snapshot: RwLock<Arc<Snapshot>>,
+    /// Advances once per request so consecutive calls start at different provider keys
+    /// instead of all knocking on the same account first.
+    key_cursor: AtomicUsize,
 }
 
 impl AppState {
@@ -63,6 +67,7 @@ impl AppState {
             config_path,
             log,
             snapshot: RwLock::new(Arc::new(Snapshot::new(config))),
+            key_cursor: AtomicUsize::new(0),
         }))
     }
 
@@ -72,6 +77,11 @@ impl AppState {
     }
 
     /// Cheap to call per request: cloning the `Arc` does not copy the configuration.
+    /// The key index the next upstream call should start from.
+    pub fn next_key_start(&self) -> usize {
+        self.key_cursor.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn snapshot(&self) -> Arc<Snapshot> {
         // A panic while holding the lock must not make the configuration permanently
         // unreadable, so a poisoned lock still yields its last value.

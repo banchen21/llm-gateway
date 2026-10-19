@@ -100,6 +100,11 @@ fn assign_missing_ids(config: &mut Config) {
                 model.id = uuid::Uuid::new_v4().simple().to_string();
             }
         }
+        for key in &mut provider.api_keys {
+            if key.id.trim().is_empty() {
+                key.id = uuid::Uuid::new_v4().simple().to_string();
+            }
+        }
     }
     for key in &mut config.server.api_keys {
         if key.id.trim().is_empty() {

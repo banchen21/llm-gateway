@@ -32,6 +32,8 @@ see what actually happened.
 - **Providers and model aliases.** Add endpoints, declare their models, and map the client
   name onto the provider's own name. Unrecognized model names are reported, never silently
   rerouted.
+- **Several keys per provider.** Separate accounts carry separate quotas, so requests
+  rotate across their keys and fall through to the next one on 429, 401 or 403.
 - **A GUI, in a window or in a browser.** The same interface runs as a desktop window and
   as a page on the gateway's port.
 - **Named inbound keys.** Issue one key per client and revoke them independently.
@@ -150,6 +152,9 @@ points. The GUI edits this file; so can you.
       "protocol": "anthropic",         // anthropic | open_ai
       "base_url": "https://api.anthropic.com",
       "api_key": "sk-…",
+      "api_keys": [                    // extra accounts for the same endpoint
+        { "id": "…", "name": "second account", "key": "sk-…" }
+      ],
       "enabled": true,
       "custom_headers": {},
       "models": [

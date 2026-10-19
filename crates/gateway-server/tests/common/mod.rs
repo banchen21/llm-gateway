@@ -89,6 +89,7 @@ pub async fn start_gateway_with(
             protocol,
             base_url: upstream.base_url.clone(),
             api_key: "test-key".into(),
+            api_keys: Vec::new(),
             enabled: true,
             custom_headers: BTreeMap::new(),
             models: vec![ProviderModel {
@@ -121,6 +122,7 @@ pub fn provider_for(upstream: &Upstream, protocol: ProviderProtocol) -> Provider
         protocol,
         base_url: upstream.base_url.clone(),
         api_key: "test-key".into(),
+        api_keys: Vec::new(),
         enabled: true,
         custom_headers: BTreeMap::new(),
         models: vec![ProviderModel {

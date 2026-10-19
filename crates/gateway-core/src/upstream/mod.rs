@@ -67,7 +67,8 @@ pub struct ProviderConfig {
     pub protocol: ProviderProtocol,
     /// The API root without a path, e.g. `https://api.anthropic.com`.
     pub base_url: String,
-    pub api_key: String,
+    /// Every key accepted for this endpoint, in the order they should be tried.
+    pub api_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom_headers: BTreeMap<String, String>,
     /// Fallback for clients that omit `max_tokens`, which Anthropic requires.
@@ -112,6 +113,9 @@ pub struct UpstreamCall {
     pub request: ChatRequest,
     /// The provider's own model id, which may differ from the client's alias.
     pub model: String,
+    /// Which key to try first. Requests rotate through the list so a key that is
+    /// rate limited is not the first one every caller touches.
+    pub key_start: usize,
 }
 
 /// Starts an upstream call and returns its normalized event stream.
@@ -139,6 +143,42 @@ const TRANSPORT_RETRIES: usize = 2;
 
 /// The pause before a replay, multiplied by the attempt number.
 const REPLAY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Sends a request with the first key the upstream accepts.
+///
+/// Keys are tried in order starting at `key_start`, so a rate-limited account is not the
+/// first door every request knocks on. A response that names a key problem — quota
+/// exhausted (429), rejected credential (401), or a plan that excludes the request (403)
+/// — moves on to the next key. Anything else is the upstream's answer and is returned.
+pub async fn send_with_keys(
+    keys: &[String],
+    key_start: usize,
+    build: impl Fn(&str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    if keys.is_empty() {
+        return Err(Error::config(
+            "the provider has no API key; add one in the provider settings",
+        ));
+    }
+    let mut last_error = None;
+    for offset in 0..keys.len() {
+        let key = &keys[(key_start + offset) % keys.len()];
+        let response = send_replaying(|| build(key)).await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            let body = response.text().await.unwrap_or_default();
+            let mut message = body;
+            message.truncate(500);
+            last_error = Some(Error::upstream(status, message));
+            continue;
+        }
+        return Ok(response);
+    }
+    Err(last_error.unwrap_or_else(|| Error::config("the provider has no API key")))
+}
 
 /// Sends a request, replaying it after a transport failure.
 ///

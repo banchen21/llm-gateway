@@ -32,7 +32,10 @@ export interface Provider {
   name: string
   protocol: ProviderProtocol
   base_url: string
+  /** The primary key. */
   api_key: string
+  /** Extra keys for the same endpoint, tried when the primary is rate limited. */
+  api_keys: ApiKey[]
   enabled: boolean
   custom_headers: Record<string, string>
   models: ProviderModel[]
@@ -120,6 +123,7 @@ export function emptyProvider(): Provider {
     protocol: 'anthropic',
     base_url: '',
     api_key: '',
+    api_keys: [],
     enabled: true,
     custom_headers: {},
     models: [],

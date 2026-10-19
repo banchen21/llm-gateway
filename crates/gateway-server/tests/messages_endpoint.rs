@@ -398,3 +398,83 @@ async fn tool_reference_blocks_are_dropped_instead_of_rejected() {
     );
     assert_eq!(sent["messages"][2]["content"][0]["content"], "found one");
 }
+
+/// Accounts sold separately carry separate quotas, so a 429 on one key must not end the
+/// request while another key is configured.
+#[tokio::test]
+async fn a_rate_limited_key_falls_through_to_the_next_one() {
+    use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::post;
+    use axum::Router;
+    use common::{serve_app, temp_config_path};
+    use gateway_core::config::{ApiKey, Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |headers: HeaderMap| {
+            let recorder = recorder.clone();
+            async move {
+                let key = headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                recorder.lock().unwrap().push(key.clone());
+                let response: Response = if key == "key-a" {
+                    (StatusCode::TOO_MANY_REQUESTS, "quota exhausted").into_response()
+                } else {
+                    ([(CONTENT_TYPE, "text/event-stream")], TEXT_AND_TOOL_SSE).into_response()
+                };
+                response
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        providers: vec![Provider {
+            id: "p1".into(),
+            name: "mock".into(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: format!("http://{address}"),
+            api_key: "key-a".into(),
+            api_keys: vec![ApiKey {
+                id: "k2".into(),
+                name: "second account".into(),
+                key: "key-b".into(),
+            }],
+            enabled: true,
+            custom_headers: Default::default(),
+            models: vec![ProviderModel {
+                id: "m1".into(),
+                alias: "test-model".into(),
+                upstream_model: "upstream-model".into(),
+                enabled: true,
+                max_output_tokens: None,
+                max_tokens_field: MaxTokensField::default(),
+                extra: Default::default(),
+            }],
+        }],
+        ..Config::default()
+    };
+    let gateway = serve_app(config, temp_config_path()).await;
+
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    assert_eq!(response.status(), 200);
+
+    let keys = seen.lock().unwrap().clone();
+    assert_eq!(
+        keys,
+        vec!["key-a", "key-b"],
+        "the second key should be tried once the first is rate limited"
+    );
+}
