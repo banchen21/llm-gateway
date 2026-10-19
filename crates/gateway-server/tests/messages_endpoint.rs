@@ -363,3 +363,38 @@ async fn a_system_role_message_is_folded_into_the_system_prompt() {
     assert_eq!(post_messages(&gateway, &payload).await.status(), 200);
     assert_eq!(upstream.last_request()["system"][0]["text"], "late context");
 }
+
+/// Claude Code's tool search answers with `tool_reference` blocks. The IR models content,
+/// and neither upstream protocol has a place for a reference, so it is dropped rather
+/// than failing the turn that carried it.
+#[tokio::test]
+async fn tool_reference_blocks_are_dropped_instead_of_rejected() {
+    let upstream = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+    let gateway = start_gateway(&upstream, ProviderProtocol::Anthropic).await;
+
+    let payload = json!({
+        "model": "test-model",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "find a weather tool"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "tool_search", "input": {"query": "weather"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                    {"type": "tool_reference", "tool_name": "get_weather"},
+                    {"type": "text", "text": "found one"}
+                ]}
+            ]}
+        ]
+    });
+
+    assert_eq!(post_messages(&gateway, &payload).await.status(), 200);
+
+    let sent = upstream.last_request();
+    assert!(
+        !sent.to_string().contains("tool_reference"),
+        "a reference has no upstream representation"
+    );
+    assert_eq!(sent["messages"][2]["content"][0]["content"], "found one");
+}

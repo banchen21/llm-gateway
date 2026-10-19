@@ -122,19 +122,25 @@ fn parse_content(value: &Value) -> Result<Vec<ContentPart>> {
     let blocks = value
         .as_array()
         .ok_or_else(|| Error::bad_request("`content` must be a string or an array of blocks"))?;
-    blocks.iter().map(parse_block).collect()
+    let mut parts = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if let Some(part) = parse_block(block)? {
+            parts.push(part);
+        }
+    }
+    Ok(parts)
 }
 
-fn parse_block(block: &Value) -> Result<ContentPart> {
+fn parse_block(block: &Value) -> Result<Option<ContentPart>> {
     let kind = block
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::bad_request("content block is missing `type`"))?;
-    match kind {
-        "text" => Ok(ContentPart::Text {
+    let part = match kind {
+        "text" => ContentPart::Text {
             text: required_str(block, "text")?.to_owned(),
-        }),
-        "thinking" => Ok(ContentPart::Thinking {
+        },
+        "thinking" => ContentPart::Thinking {
             text: required_str(block, "thinking")?.to_owned(),
             // An empty signature is indistinguishable from a missing one, and only a
             // non-empty signature makes the block replayable upstream.
@@ -144,31 +150,38 @@ fn parse_block(block: &Value) -> Result<ContentPart> {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             ),
-        }),
-        "redacted_thinking" => Ok(ContentPart::RedactedThinking {
+        },
+        "redacted_thinking" => ContentPart::RedactedThinking {
             data: required_str(block, "data")?.to_owned(),
-        }),
-        "tool_use" => Ok(ContentPart::ToolUse {
+        },
+        "tool_use" => ContentPart::ToolUse {
             id: required_str(block, "id")?.to_owned(),
             name: required_str(block, "name")?.to_owned(),
             input: block
                 .get("input")
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Default::default())),
-        }),
-        "tool_result" => Ok(ContentPart::ToolResult {
+        },
+        "tool_result" => ContentPart::ToolResult {
             tool_use_id: required_str(block, "tool_use_id")?.to_owned(),
             content: parse_tool_result_content(block.get("content"))?,
             is_error: block
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-        }),
-        "image" => parse_image(block),
-        other => Err(Error::bad_request(format!(
-            "unsupported content block type: {other}"
-        ))),
-    }
+        },
+        "image" => parse_image(block)?,
+        // Tool search answers with references to tools rather than with content. The IR
+        // models message content only and neither upstream protocol has a place for a
+        // reference, so it is dropped instead of failing the request that carried it.
+        "tool_reference" | "tool_search_tool_result" => return Ok(None),
+        other => {
+            return Err(Error::bad_request(format!(
+                "unsupported content block type: {other}"
+            )))
+        }
+    };
+    Ok(Some(part))
 }
 
 /// A tool result's content is a bare string, or an array of blocks (typically text).
