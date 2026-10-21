@@ -1,16 +1,17 @@
 //! Holds the gateway's shared state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gateway_core::config::{self, Config};
 use gateway_core::router::Router;
 use gateway_core::Result;
 
 use crate::logging::RequestLog;
+use crate::quota::{self, ProviderQuota};
 
 /// A configuration together with everything derived from it.
 ///
@@ -39,9 +40,13 @@ pub struct AppState {
     /// Built on the first connection failure, if the system has a proxy configured.
     proxy_client: OnceLock<reqwest::Client>,
     /// Routes that recently took too long to answer, and when they may be tried again.
-    slow_routes: Mutex<HashMap<String, std::time::Instant>>,
+    slow_routes: Mutex<HashMap<String, SlowRoute>>,
     /// How well the direct and proxy paths have been behaving lately.
     paths: Mutex<PathStats>,
+    /// The last account-quota reading per provider id.
+    quotas: Mutex<HashMap<String, ProviderQuota>>,
+    /// Keys an upstream recently refused, so they are not chosen again immediately.
+    key_cooldowns: Mutex<HashMap<(String, String), KeyCooldown>>,
 }
 
 /// Which route to the internet a request should take.
@@ -121,6 +126,8 @@ impl AppState {
             proxy_client: OnceLock::new(),
             slow_routes: Mutex::new(HashMap::new()),
             paths: Mutex::new(PathStats::default()),
+            quotas: Mutex::new(HashMap::new()),
+            key_cooldowns: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -167,30 +174,43 @@ impl AppState {
     }
 
     /// Whether this route answered too slowly recently enough to avoid it.
+    ///
+    /// An expired entry is left in place so consecutive stalls keep compounding; a
+    /// successful answer clears it through [`Self::mark_healthy`].
     pub fn is_slow(&self, route: &str) -> bool {
-        let mut slow = self
+        let slow = self
             .slow_routes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match slow.get(route) {
-            Some(until) if *until > std::time::Instant::now() => true,
-            Some(_) => {
-                slow.remove(route);
-                false
-            }
-            None => false,
-        }
+        slow.get(route)
+            .is_some_and(|entry| entry.until > std::time::Instant::now())
     }
 
     /// Keeps this route out of the way for a while after it stalled.
+    ///
+    /// Each consecutive stall doubles the cooldown: a provider that hiccuped once is
+    /// retried after two minutes, while one that keeps stalling is left alone for up to
+    /// half an hour. This is what stops a degraded provider from costing a request every
+    /// couple of minutes.
     pub fn mark_slow(&self, route: &str) {
+        let now = std::time::Instant::now();
         self.slow_routes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                route.to_owned(),
-                std::time::Instant::now() + SLOW_ROUTE_COOLDOWN,
-            );
+            .entry(route.to_owned())
+            .or_insert(SlowRoute {
+                until: now,
+                strikes: 0,
+            })
+            .extend(now);
+    }
+
+    /// Clears the stall history after a route answered successfully.
+    pub fn mark_healthy(&self, route: &str) {
+        self.slow_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(route);
     }
 
     /// A client that reaches the internet through the system proxy, built once.
@@ -212,6 +232,86 @@ impl AppState {
     /// The key index the next upstream call should start from.
     pub fn next_key_start(&self) -> usize {
         self.key_cursor.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Publishes one quota reading for the request path and the GUI to share.
+    pub fn store_quota(&self, quota: ProviderQuota) {
+        self.quotas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(quota.provider_id.clone(), quota);
+    }
+
+    /// The latest quota readings, ordered by provider id for a stable response.
+    pub fn quota_snapshot(&self) -> Vec<ProviderQuota> {
+        let mut quotas: Vec<ProviderQuota> = self
+            .quotas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        quotas.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        quotas
+    }
+
+    /// Remembers that an upstream refused a key, so the next request starts elsewhere.
+    ///
+    /// A credential or balance error is not going to fix itself in the next minute, while
+    /// a rate-limit window often clears when it resets; the cooldowns differ accordingly.
+    /// A 400 only reaches this method when its body named the account rather than the
+    /// request.
+    pub fn record_key_refusal(&self, provider_id: &str, key: &str, status: u16) {
+        let cooldown = match status {
+            429 => Duration::from_secs(60),
+            400..=403 => Duration::from_secs(600),
+            _ => return,
+        };
+        let now = Instant::now();
+        let mut cooldowns = self
+            .key_cooldowns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cooldowns.retain(|_, entry| entry.until > now);
+        cooldowns.insert(
+            (provider_id.to_owned(), key.to_owned()),
+            KeyCooldown {
+                until: now + cooldown,
+            },
+        );
+        tracing::warn!(
+            provider = %provider_id,
+            status,
+            seconds = cooldown.as_secs(),
+            "an account key was refused; another key will be tried first"
+        );
+    }
+
+    /// Orders a provider's keys so an account that can answer comes first.
+    ///
+    /// The second value says whether ranking had real quota data; when it did not, the
+    /// caller keeps rotating instead of pinning every request to the same key.
+    pub fn order_keys(&self, provider_id: &str, keys: Vec<String>) -> (Vec<String>, bool) {
+        let now = Instant::now();
+        let cooling: HashSet<String> = {
+            let mut cooldowns = self
+                .key_cooldowns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Expired entries carry no information, and cleaning them here keeps the map
+            // proportional to the accounts currently being avoided.
+            cooldowns.retain(|_, entry| entry.until > now);
+            cooldowns
+                .iter()
+                .filter(|((provider, _), _)| provider == provider_id)
+                .map(|((_, key), _)| key.clone())
+                .collect()
+        };
+        let quotas = self
+            .quotas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        quota::rank_keys(keys, quotas.get(provider_id), &cooling, quota::now_ms())
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -254,6 +354,38 @@ fn decide(stats: &PathStats, proxy_available: bool) -> Path {
 
 /// How long a route stays avoided after it misses the first-byte deadline.
 const SLOW_ROUTE_COOLDOWN: Duration = Duration::from_secs(120);
+/// How long a route can be avoided after stalling repeatedly.
+const MAX_SLOW_ROUTE_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+/// How many times the base cooldown may be doubled before the cap applies.
+const MAX_SLOW_DOUBLINGS: u32 = 4;
+
+/// A key that an upstream refused recently.
+struct KeyCooldown {
+    /// When the key may be chosen first again.
+    until: Instant,
+}
+
+/// A route's stall history since it last answered.
+#[derive(Clone, Copy)]
+struct SlowRoute {
+    /// When the route may be tried again.
+    until: std::time::Instant,
+    /// Consecutive stalls, which set the length of the next cooldown.
+    strikes: u32,
+}
+
+impl SlowRoute {
+    fn extend(&mut self, now: std::time::Instant) {
+        self.strikes = self.strikes.saturating_add(1);
+        self.until = now + cooldown_after(self.strikes);
+    }
+}
+
+/// The cooldown after the route's `strikes`-th consecutive stall.
+fn cooldown_after(strikes: u32) -> Duration {
+    let doublings = strikes.saturating_sub(1).min(MAX_SLOW_DOUBLINGS);
+    (SLOW_ROUTE_COOLDOWN * (1 << doublings)).min(MAX_SLOW_ROUTE_COOLDOWN)
+}
 
 /// The one place an upstream HTTP client is configured.
 fn build_client(proxy: Option<&str>) -> reqwest::Result<reqwest::Client> {
@@ -326,5 +458,15 @@ mod tests {
     fn no_proxy_configured_means_direct() {
         let state = stats(&[(800, true), (800, true)], &[(100, true), (100, true)]);
         assert_eq!(decide(&state, false), Path::Direct);
+    }
+
+    #[test]
+    fn repeated_stalls_double_the_cooldown_up_to_the_cap() {
+        assert_eq!(cooldown_after(1), Duration::from_secs(120));
+        assert_eq!(cooldown_after(2), Duration::from_secs(240));
+        assert_eq!(cooldown_after(3), Duration::from_secs(480));
+        assert_eq!(cooldown_after(4), Duration::from_secs(960));
+        assert_eq!(cooldown_after(5), MAX_SLOW_ROUTE_COOLDOWN);
+        assert_eq!(cooldown_after(50), MAX_SLOW_ROUTE_COOLDOWN);
     }
 }

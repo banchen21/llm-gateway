@@ -20,7 +20,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use gateway_core::config::{Config, ProtocolMode, Provider, ProviderModel};
 use gateway_core::convert::{anthropic_in, anthropic_out, openai_in, openai_out};
-use gateway_core::ir::ChatRequest;
+use gateway_core::ir::{ChatRequest, ContentPart, ModelEvent};
 use gateway_core::upstream::{self, ProviderConfig, UpstreamCall};
 use gateway_core::Error;
 use serde_json::{json, Value};
@@ -121,9 +121,16 @@ async fn serve_inner(
     let mut route_key = format!("{}/{}", route.provider.id, route.model.id);
     let deadline = (snapshot.config.slow_after_ms > 0)
         .then(|| Duration::from_millis(snapshot.config.slow_after_ms));
+    // The opening deadline stops applying once the stream starts; this one covers the
+    // whole response, so a provider that falls silent mid-stream is still noticed.
+    let idle = (snapshot.config.stream_idle_ms > 0)
+        .then(|| Duration::from_millis(snapshot.config.stream_idle_ms));
 
-    // A route that stalled a moment ago does not get to stall this request too.
-    if deadline.is_some() && snapshot.config.failover && state.is_slow(&route_key) {
+    // A route that stalled a moment ago does not get to stall this request too. A route
+    // can be marked by a mid-stream timeout even when only the idle watchdog is enabled,
+    // so this must not depend on the opening deadline.
+    let mut answering_elsewhere = false;
+    if snapshot.config.failover && state.is_slow(&route_key) {
         if let Some(target) = alternate_target(&snapshot.config, &current_provider_id) {
             tracing::warn!(
                 stalled = %route_key,
@@ -135,10 +142,11 @@ async fn serve_inner(
             provider = target.config;
             route_key = target.key;
             current_provider_id = target.provider_id;
+            answering_elsewhere = true;
         }
     }
 
-    let usage = Arc::new(Mutex::new(None));
+    let mut usage = Arc::new(Mutex::new(None));
     // Recent behaviour decides whether this request starts down the direct path or the
     // proxy; a lone measurement is not enough to switch, and the loser is still probed.
     let chosen = state.choose_path();
@@ -149,20 +157,33 @@ async fn serve_inner(
         Path::Direct => state.http.clone(),
     };
     let opening = std::time::Instant::now();
+    // A provider picked because the first one stalled never issued the reasoning blocks
+    // in this conversation, so it gets a request it can actually validate.
+    let alternate_request;
+    let primary_request = if answering_elsewhere {
+        alternate_request = for_alternate_provider(&request);
+        &alternate_request
+    } else {
+        &request
+    };
     let mut primary = call_upstream(
         state,
+        &current_provider_id,
         &provider,
-        &request,
+        primary_request,
         &upstream_model,
         client,
-        deadline,
+        CallLimits {
+            opening: deadline,
+            idle,
+        },
     )
     .await;
     state.record_path(chosen, opening.elapsed(), primary.is_ok());
 
     // The first byte never arrived. Treat it as a stall rather than an answer: remember
     // it so the next request skips this route, and let another provider try now.
-    if matches!(&primary, Err(Error::Provider(_))) && deadline.is_some() {
+    if matches!(&primary, Err(Error::Timeout(_))) && deadline.is_some() {
         state.mark_slow(&route_key);
         if snapshot.config.failover {
             if let Some(target) = alternate_target(&snapshot.config, &current_provider_id) {
@@ -176,17 +197,22 @@ async fn serve_inner(
                 provider = target.config;
                 route_key = target.key;
                 current_provider_id = target.provider_id;
+                let alternate_request = for_alternate_provider(&request);
                 primary = call_upstream(
                     state,
+                    &current_provider_id,
                     &provider,
-                    &request,
+                    &alternate_request,
                     &upstream_model,
                     state.http.clone(),
-                    deadline,
+                    CallLimits {
+                        opening: deadline,
+                        idle,
+                    },
                 )
                 .await;
                 // The alternate can stall too; record it so it is skipped next time.
-                if matches!(&primary, Err(Error::Provider(_))) {
+                if matches!(&primary, Err(Error::Timeout(_))) {
                     state.mark_slow(&route_key);
                 }
             }
@@ -208,11 +234,15 @@ async fn serve_inner(
             let opening = std::time::Instant::now();
             primary = call_upstream(
                 state,
+                &current_provider_id,
                 &provider,
-                &request,
+                primary_request,
                 &upstream_model,
                 client,
-                deadline,
+                CallLimits {
+                    opening: deadline,
+                    idle,
+                },
             )
             .await;
             state.record_path(other, opening.elapsed(), primary.is_ok());
@@ -222,11 +252,21 @@ async fn serve_inner(
     let attempted = match primary {
         Ok(events) => Ok(events),
         Err(error) if snapshot.config.failover && error.is_provider_refusal() => {
-            match failover(state, &snapshot.config, &request, &current_provider_id).await {
-                Some((events, provider, model)) => {
-                    provider_name = provider;
-                    upstream_model = model;
-                    Ok(events)
+            match failover(
+                state,
+                &snapshot.config,
+                &request,
+                &current_provider_id,
+                idle,
+            )
+            .await
+            {
+                Some(answer) => {
+                    provider_name = answer.provider_name;
+                    upstream_model = answer.upstream_model;
+                    route_key = answer.route_key;
+                    current_provider_id = answer.provider_id;
+                    Ok(answer.events)
                 }
                 None => Err(error),
             }
@@ -237,41 +277,73 @@ async fn serve_inner(
     let events = match attempted {
         Ok(events) => events,
         Err(error) => {
-            // A 5xx means nothing answered usefully — a dead route, a proxy that is not
-            // running, an upstream that fell over. That is the operator's problem to fix,
-            // not the request's, so it goes where they will see it. Refusals (401/403/429)
-            // stay quiet: another provider already had its chance, and the log has them.
-            if error.http_status() >= 500 {
-                crate::notify::network_problem(
-                    "无法连接上游，请检查网络连接或代理设置。网关会在恢复后自动重试。",
-                );
-            }
-            state
-                .log
-                .record(Record {
-                    alias,
-                    provider: provider_name,
-                    upstream_model,
-                    stream: streaming,
+            record_failure(
+                state,
+                FailedRequest {
+                    alias: alias.clone(),
+                    provider_name: provider_name.clone(),
+                    upstream_model: upstream_model.clone(),
+                    streaming,
                     prompt,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                    outcome: Outcome::Failed {
-                        status: error.http_status(),
-                        message: error.to_string(),
-                    },
-                })
-                .await;
+                    started,
+                },
+                &error,
+            )
+            .await;
             return Err(error);
         }
     };
+    // How the stream ends decides whether this route is avoided or trusted next time.
+    let events = watch_route(state.clone(), route_key.clone(), events);
     let events = logging::capture_usage(events, usage.clone());
 
     let id = protocol.new_id();
     let model = alias.clone();
     if !streaming {
-        let body = match protocol {
-            Protocol::Anthropic => anthropic_out::complete(events, &id, &model).await?,
-            Protocol::OpenAi => openai_out::complete(events, &id, &model).await?,
+        let mut body = complete(protocol, events, &id, &model).await;
+        // Nothing has reached the client yet, so a failure partway through the upstream
+        // stream can still be answered by another provider. A streaming response has
+        // already committed its opening frames by then and cannot be replayed.
+        if body.is_err() && snapshot.config.failover {
+            if let Some(answer) = failover(
+                state,
+                &snapshot.config,
+                &request,
+                &current_provider_id,
+                idle,
+            )
+            .await
+            {
+                provider_name = answer.provider_name;
+                upstream_model = answer.upstream_model;
+                route_key = answer.route_key;
+                // A fresh sink: tokens the failed attempt produced must not be reported
+                // as the answer that was actually returned.
+                let retry_usage = Arc::new(Mutex::new(None));
+                let retry_events = watch_route(state.clone(), route_key.clone(), answer.events);
+                let retry_events = logging::capture_usage(retry_events, retry_usage.clone());
+                usage = retry_usage;
+                body = complete(protocol, retry_events, &id, &model).await;
+            }
+        }
+        let body = match body {
+            Ok(body) => body,
+            Err(error) => {
+                record_failure(
+                    state,
+                    FailedRequest {
+                        alias: alias.clone(),
+                        provider_name: provider_name.clone(),
+                        upstream_model: upstream_model.clone(),
+                        streaming: false,
+                        prompt,
+                        started,
+                    },
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
         };
         state
             .log
@@ -325,6 +397,58 @@ async fn serve_inner(
         &provider_name,
         &upstream_model,
     ))
+}
+
+/// Drains a normalized stream into the response shape the calling protocol expects.
+async fn complete(
+    protocol: Protocol,
+    events: gateway_core::ir::EventStream,
+    id: &str,
+    model: &str,
+) -> gateway_core::Result<Value> {
+    match protocol {
+        Protocol::Anthropic => anthropic_out::complete(events, id, model).await,
+        Protocol::OpenAi => openai_out::complete(events, id, model).await,
+    }
+}
+
+/// What is known about a request that produced no response.
+struct FailedRequest {
+    alias: String,
+    provider_name: String,
+    upstream_model: String,
+    streaming: bool,
+    prompt: PromptShape,
+    started: std::time::Instant,
+}
+
+/// Records a request that produced no response, and tells the operator when the failure
+/// is theirs to fix.
+///
+/// A 5xx means nothing answered usefully — a dead route, a proxy that is not running, an
+/// upstream that fell over. Refusals (401/403/429) stay quiet: another provider already
+/// had its chance, and the log has them.
+async fn record_failure(state: &Arc<AppState>, request: FailedRequest, error: &Error) {
+    if error.http_status() >= 500 {
+        crate::notify::network_problem(
+            "无法连接上游，请检查网络连接或代理设置。网关会在恢复后自动重试。",
+        );
+    }
+    state
+        .log
+        .record(Record {
+            alias: request.alias,
+            provider: request.provider_name,
+            upstream_model: request.upstream_model,
+            stream: request.streaming,
+            prompt: request.prompt,
+            duration_ms: request.started.elapsed().as_millis() as u64,
+            outcome: Outcome::Failed {
+                status: error.http_status(),
+                message: error.to_string(),
+            },
+        })
+        .await;
 }
 
 /// Tells the caller which provider and upstream model actually answered.
@@ -413,27 +537,48 @@ fn presented_key(headers: &HeaderMap) -> Option<String> {
         .then(|| token.to_owned())
 }
 
-/// Projects a resolved route into the configuration an upstream adapter needs.
+/// The clocks a call runs under: how long its opening may take, and how long its stream
+/// may stay silent.
+#[derive(Clone, Copy)]
+struct CallLimits {
+    opening: Option<Duration>,
+    idle: Option<Duration>,
+}
+
 /// One upstream call, optionally abandoned when the first event takes too long.
 ///
 /// The deadline is what makes "working but slow" visible: a provider like that never
 /// returns an error, so only a clock can tell the difference between thinking and stalling.
 async fn call_upstream(
     state: &Arc<AppState>,
+    provider_id: &str,
     config: &ProviderConfig,
     request: &ChatRequest,
     model: &str,
     client: reqwest::Client,
-    deadline: Option<Duration>,
+    limits: CallLimits,
 ) -> gateway_core::Result<gateway_core::ir::EventStream> {
+    // Quota-aware ordering puts the account with the most usable credit first. Without
+    // quota data the cursor still rotates, so equal accounts share the load.
+    let (api_keys, ranked) = state.order_keys(provider_id, config.api_keys.clone());
+    let key_start = if ranked { 0 } else { state.next_key_start() };
+    let refusal_state = state.clone();
+    let refusal_provider = provider_id.to_owned();
     let call = UpstreamCall {
         client,
-        config: config.clone(),
+        config: ProviderConfig {
+            api_keys,
+            ..config.clone()
+        },
         request: request.clone(),
         model: model.to_owned(),
-        key_start: state.next_key_start(),
+        key_start,
+        idle: limits.idle,
+        on_key_refused: Some(Arc::new(move |key: &str, status: u16| {
+            refusal_state.record_key_refusal(&refusal_provider, key, status);
+        })),
     };
-    let Some(limit) = deadline else {
+    let Some(limit) = limits.opening else {
         return upstream::stream(call).await;
     };
     // The clock covers the whole exchange up to the first event: connect, response
@@ -450,7 +595,7 @@ async fn call_upstream(
     };
     match tokio::time::timeout(limit, opening).await {
         Ok(result) => result,
-        Err(_) => Err(Error::Provider(format!(
+        Err(_) => Err(Error::Timeout(format!(
             "the upstream produced no output within {}ms",
             limit.as_millis()
         ))),
@@ -486,8 +631,74 @@ fn alternate_target(config: &Config, exclude: &str) -> Option<Alternate> {
     None
 }
 
+/// The request as a provider other than the one the alias names can accept.
+///
+/// Reasoning blocks belong to the model that issued them: a signature is only valid at
+/// its issuer, and an endpoint running in thinking mode demands its own blocks back
+/// (DeepSeek answers a replayed conversation with "The `content[].thinking` in the
+/// thinking mode must be passed back to the API"). A fallback therefore gets the
+/// conversation without reasoning and with thinking turned off, rather than a request the
+/// new provider cannot validate.
+fn for_alternate_provider(request: &ChatRequest) -> ChatRequest {
+    fn strip(parts: &mut Vec<ContentPart>) {
+        parts.retain(|part| {
+            !matches!(
+                part,
+                ContentPart::Thinking { .. } | ContentPart::RedactedThinking { .. }
+            )
+        });
+        for part in parts.iter_mut() {
+            if let ContentPart::ToolResult { content, .. } = part {
+                strip(content);
+            }
+        }
+    }
+
+    let mut request = request.clone();
+    request.thinking = None;
+    for message in &mut request.messages {
+        strip(&mut message.content);
+    }
+    request
+}
+
+/// Watches a served stream so its route is remembered for what it did.
+///
+/// Any error is what the client receives, and recording it is what makes the next request
+/// avoid the same route for longer. A route that reaches `Done` clears its stall history,
+/// so a provider that recovered is trusted again immediately.
+fn watch_route(
+    state: Arc<AppState>,
+    route_key: String,
+    mut events: gateway_core::ir::EventStream,
+) -> gateway_core::ir::EventStream {
+    Box::pin(async_stream::stream! {
+        while let Some(result) = events.next().await {
+            match &result {
+                Ok(ModelEvent::Done(_)) => state.mark_healthy(&route_key),
+                Err(_) => state.mark_slow(&route_key),
+                _ => {}
+            }
+            let failed = result.is_err();
+            yield result;
+            if failed {
+                break;
+            }
+        }
+    })
+}
+
+/// A provider that answered in place of the one the alias named.
+struct FallbackAnswer {
+    events: gateway_core::ir::EventStream,
+    provider_name: String,
+    upstream_model: String,
+    provider_id: String,
+    route_key: String,
+}
+
 /// Asks the other enabled providers, in configuration order, when the one the alias
-/// names refuses the request.
+/// names refuses the request or its stream fails before anything reached the client.
 ///
 /// An alias means nothing to another provider, so each candidate answers with its own
 /// first enabled model. That is the deliberate compromise of a switch that needs no
@@ -498,7 +709,9 @@ async fn failover(
     config: &Config,
     request: &ChatRequest,
     primary_provider_id: &str,
-) -> Option<(gateway_core::ir::EventStream, String, String)> {
+    idle: Option<Duration>,
+) -> Option<FallbackAnswer> {
+    let request = for_alternate_provider(request);
     for candidate in &config.providers {
         if !candidate.enabled || candidate.id == primary_provider_id {
             continue;
@@ -506,21 +719,33 @@ async fn failover(
         let Some(model) = candidate.models.iter().find(|model| model.enabled) else {
             continue;
         };
-        let call = UpstreamCall {
-            client: state.http.clone(),
-            config: provider_config(candidate, model),
-            request: request.clone(),
-            model: model.upstream_model.clone(),
-            key_start: state.next_key_start(),
-        };
-        match upstream::stream(call).await {
+        match call_upstream(
+            state,
+            &candidate.id,
+            &provider_config(candidate, model),
+            &request,
+            &model.upstream_model,
+            state.http.clone(),
+            CallLimits {
+                opening: None,
+                idle,
+            },
+        )
+        .await
+        {
             Ok(events) => {
                 tracing::warn!(
                     provider = %candidate.name,
                     model = %model.upstream_model,
-                    "the primary provider refused; a fallback answered"
+                    "the named provider did not answer; a fallback did"
                 );
-                return Some((events, candidate.name.clone(), model.upstream_model.clone()));
+                return Some(FallbackAnswer {
+                    events,
+                    provider_name: candidate.name.clone(),
+                    upstream_model: model.upstream_model.clone(),
+                    provider_id: candidate.id.clone(),
+                    route_key: format!("{}/{}", candidate.id, model.id),
+                });
             }
             Err(error) => {
                 tracing::warn!(provider = %candidate.name, %error, "a fallback provider failed too");

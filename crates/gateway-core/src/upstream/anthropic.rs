@@ -30,18 +30,24 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 
 pub async fn stream(call: UpstreamCall) -> Result<EventStream> {
     let body = request_body(&call)?;
-    let response = send_with_keys(&call.config.api_keys, call.key_start, |key| {
-        let mut request = call
-            .client
-            .post(call.config.endpoint("/v1/messages"))
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("x-api-key", key)
-            .json(&body);
-        for (name, value) in &call.config.custom_headers {
-            request = request.header(name, value);
-        }
-        request
-    })
+    let notify = call.on_key_refused.clone();
+    let response = send_with_keys(
+        &call.config.api_keys,
+        call.key_start,
+        |key| {
+            let mut request = call
+                .client
+                .post(call.config.endpoint("/v1/messages"))
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("x-api-key", key)
+                .json(&body);
+            for (name, value) in &call.config.custom_headers {
+                request = request.header(name, value);
+            }
+            request
+        },
+        notify.as_deref(),
+    )
     .await?;
     let status = response.status();
     if !status.is_success() {
@@ -73,7 +79,8 @@ fn request_body(call: &UpstreamCall) -> Result<Value> {
         "messages".into(),
         json!(messages(
             request,
-            requires_signature(&call.config.base_url)
+            requires_signature(&call.config.base_url),
+            requires_tool_thinking(&call.config.base_url)
         )?),
     );
     if let Some(temperature) = request.temperature {
@@ -136,30 +143,60 @@ fn thinking(config: &Option<ThinkingConfig>) -> Option<Value> {
         .map(|budget| json!({"type": "enabled", "budget_tokens": budget}))
 }
 
-/// Whether this endpoint demands a signature on every thinking block.
-///
-/// Only Anthropic's own API does; compatible vendors accept a block without one, and
-/// some require the block to be present.
-fn requires_signature(base_url: &str) -> bool {
-    let host = base_url
+/// The endpoint's host, without scheme, port or path.
+fn host_of(base_url: &str) -> &str {
+    base_url
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(base_url)
         .split('/')
         .next()
-        .unwrap_or("");
-    host.eq_ignore_ascii_case("api.anthropic.com")
-        || host.to_ascii_lowercase().ends_with(".anthropic.com")
+        .unwrap_or("")
 }
 
-fn messages(request: &ChatRequest, strict: bool) -> Result<Vec<Value>> {
+/// Whether this endpoint demands a signature on every thinking block.
+///
+/// Only Anthropic's own API does; compatible vendors accept a block without one, and
+/// some require the block to be present.
+fn requires_signature(base_url: &str) -> bool {
+    let host = host_of(base_url).to_ascii_lowercase();
+    host == "api.anthropic.com" || host.ends_with(".anthropic.com")
+}
+
+/// Whether a `tool_use` turn must carry a thinking block before it.
+///
+/// DeepSeek's thinking models always reason, and their endpoint validates that every
+/// assistant turn which asked for a tool carries the reasoning that led to it. When the
+/// history came from another provider — or from a client that drops reasoning while
+/// serializing it — the block is missing, and the next agent step (a request ending in a
+/// `tool_result`) is rejected with "The `content[].thinking` in the thinking mode must be
+/// passed back to the API". An empty block satisfies the check without inventing content.
+fn requires_tool_thinking(base_url: &str) -> bool {
+    host_of(base_url)
+        .to_ascii_lowercase()
+        .ends_with("deepseek.com")
+}
+
+fn messages(request: &ChatRequest, strict: bool, tool_thinking: bool) -> Result<Vec<Value>> {
     let mut output: Vec<Value> = Vec::new();
     for message in &request.messages {
         let role = match message.role {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
-        let content = blocks(role, &message.content, strict)?;
+        let mut content = blocks(role, &message.content, strict)?;
+        if role == "assistant"
+            && tool_thinking
+            && content.iter().any(|block| block["type"] == "tool_use")
+            && !content.iter().any(|block| {
+                matches!(
+                    block["type"].as_str(),
+                    Some("thinking" | "redacted_thinking")
+                )
+            })
+        {
+            content.insert(0, json!({"type": "thinking", "thinking": ""}));
+        }
         if content.is_empty() {
             continue;
         }
@@ -533,7 +570,8 @@ fn truncate(body: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::requires_signature;
+    use super::*;
+    use crate::ir::Message;
 
     #[test]
     fn only_the_official_api_requires_a_signature() {
@@ -543,5 +581,51 @@ mod tests {
         assert!(!requires_signature("https://api.deepseek.com/anthropic"));
         assert!(!requires_signature("http://127.0.0.1:8080"));
         assert!(!requires_signature(""));
+    }
+
+    #[test]
+    fn deepseek_is_the_endpoint_that_requires_tool_thinking() {
+        assert!(requires_tool_thinking("https://api.deepseek.com/anthropic"));
+        assert!(requires_tool_thinking("https://eu.deepseek.com"));
+        assert!(!requires_tool_thinking("https://api.anthropic.com"));
+        assert!(!requires_tool_thinking("http://127.0.0.1:8080"));
+        assert!(!requires_tool_thinking(""));
+    }
+
+    #[test]
+    fn a_tool_turn_without_reasoning_gains_an_empty_block_for_deepseek() {
+        let request = ChatRequest {
+            model: "m".into(),
+            system: None,
+            messages: vec![
+                Message::user(vec![ContentPart::text("hi")]),
+                Message::assistant(vec![ContentPart::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "t".into(),
+                    input: json!({}),
+                }]),
+                Message::user(vec![ContentPart::ToolResult {
+                    tool_use_id: "toolu_1".into(),
+                    content: vec![ContentPart::text("done")],
+                    is_error: false,
+                }]),
+            ],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: Some(64),
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            stream: false,
+            thinking: None,
+        };
+
+        let rendered = messages(&request, false, true).unwrap();
+        assert_eq!(rendered[1]["content"][0]["type"], "thinking");
+        assert_eq!(rendered[1]["content"][0]["thinking"], "");
+        assert_eq!(rendered[1]["content"][1]["type"], "tool_use");
+
+        let untouched = messages(&request, false, false).unwrap();
+        assert_eq!(untouched[1]["content"][0]["type"], "tool_use");
     }
 }

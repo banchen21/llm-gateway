@@ -41,6 +41,44 @@ export interface Provider {
   models: ProviderModel[]
 }
 
+/** One rate-limit window on an upstream account. */
+export interface QuotaWindow {
+  used: number
+  cap: number
+  exceeded: boolean
+  /** Milliseconds since the Unix epoch, as the upstream reports it. */
+  reset_at: number | null
+}
+
+/** What one upstream API key's account looks like right now. */
+export interface KeyQuota {
+  /** The credential's last four characters, for matching a row to a key field. */
+  hint: string
+  account: string | null
+  email: string | null
+  /** The subscription plan id, e.g. `individual-goat`. */
+  plan: string | null
+  plan_status: string | null
+  period_end: string | null
+  monthly_credits: number | null
+  purchased_credits: number | null
+  free_credits: number | null
+  five_hour: QuotaWindow | null
+  weekly: QuotaWindow | null
+  /** When this reading was taken, in milliseconds since the Unix epoch. */
+  fetched_at: number
+  /** Why the quota could not be read; such a key is treated as unknown, not exhausted. */
+  error: string | null
+}
+
+export interface ProviderQuota {
+  provider_id: string
+  /** False for endpoints whose quota API the gateway does not know. */
+  supported: boolean
+  fetched_at: number
+  keys: KeyQuota[]
+}
+
 /** One named inbound key, so a client can be revoked without disturbing the others. */
 export interface ApiKey {
   /** Assigned by the gateway when the entry has none. */
@@ -77,6 +115,8 @@ export interface GatewayConfig {
   failover: boolean
   /** Answer elsewhere when the first byte takes longer than this; 0 disables it. */
   slow_after_ms: number
+  /** End a stream that produces no event for this long; 0 disables it. */
+  stream_idle_ms: number
 }
 
 export interface ConfigEnvelope {
@@ -168,6 +208,7 @@ export function emptyConfig(): GatewayConfig {
     default_provider_id: null,
     failover: false,
     slow_after_ms: 0,
+    stream_idle_ms: 120000,
   }
 }
 

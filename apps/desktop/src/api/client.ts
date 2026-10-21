@@ -6,9 +6,22 @@
  * protocol cannot reach the gateway by a relative path). The desktop shell injects
  * `__LLM_GATEWAY_BASE__` to cover the last case; the other two work with a relative path.
  */
-import type { ConfigEnvelope, GatewayConfig, Health, LogEntry, Provider } from './types'
+import type {
+  ConfigEnvelope,
+  GatewayConfig,
+  Health,
+  LogEntry,
+  Provider,
+  ProviderQuota,
+} from './types'
 
-export type { ConfigEnvelope, GatewayConfig, Health, LogEntry } from './types'
+export type {
+  ConfigEnvelope,
+  GatewayConfig,
+  Health,
+  LogEntry,
+  ProviderQuota,
+} from './types'
 
 declare global {
   interface Window {
@@ -119,4 +132,34 @@ export function fetchProviderModels(provider: Provider): Promise<{ models: strin
       custom_headers: provider.custom_headers,
     }),
   })
+}
+
+/** The quota readings the gateway already has, without asking any upstream again. */
+export function fetchQuotas(): Promise<{ providers: ProviderQuota[] }> {
+  return request<{ providers: ProviderQuota[] }>('/admin/provider-quota')
+}
+
+/**
+ * Reads a provider's account quotas now, including for an unsaved draft.
+ *
+ * `supported` is false for endpoints whose quota API the gateway does not know.
+ */
+export function refreshProviderQuota(
+  provider: Provider,
+): Promise<{ supported: boolean; quota: ProviderQuota | null }> {
+  return request<{ supported: boolean; quota: ProviderQuota | null }>(
+    '/admin/provider-quota',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        id: provider.id,
+        name: provider.name,
+        protocol: provider.protocol,
+        base_url: provider.base_url,
+        api_key: provider.api_key,
+        api_keys: provider.api_keys,
+        custom_headers: provider.custom_headers,
+      }),
+    },
+  )
 }

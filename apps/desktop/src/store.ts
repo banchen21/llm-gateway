@@ -25,11 +25,10 @@ function snapshot(): string {
 
 /** Replaces the editable document in place, keeping the reactive object identity. */
 function adopt(next: GatewayConfig): void {
-  config.protocol_mode = next.protocol_mode
-  config.server = next.server
-  config.web_ui = next.web_ui
-  config.providers = next.providers
-  config.default_provider_id = next.default_provider_id
+  // Copy every field rather than a hand-picked list: a setting that load() forgets to
+  // adopt silently snaps back to its default after a refresh, and the next save then
+  // persists the default over what the user chose.
+  Object.assign(config, next)
 }
 
 watch(

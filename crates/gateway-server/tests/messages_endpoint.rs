@@ -479,6 +479,80 @@ async fn a_rate_limited_key_falls_through_to_the_next_one() {
     );
 }
 
+/// Some compatible endpoints route on a header instead of the URL, so the headers a
+/// provider carries in its configuration have to reach the upstream request unchanged.
+#[tokio::test]
+async fn provider_custom_headers_reach_the_upstream() {
+    use axum::http::{header::CONTENT_TYPE, HeaderMap};
+    use axum::routing::post;
+    use axum::Router;
+    use common::{serve_app, temp_config_path};
+    use gateway_core::config::{Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |headers: HeaderMap| {
+            let recorder = recorder.clone();
+            async move {
+                let name = "x-opencode-session";
+                let value = headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                recorder.lock().unwrap().push((name.to_owned(), value));
+                ([(CONTENT_TYPE, "text/event-stream")], TEXT_AND_TOOL_SSE)
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        providers: vec![Provider {
+            id: "p1".into(),
+            name: "mock".into(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: format!("http://{address}"),
+            api_key: "key".into(),
+            api_keys: Vec::new(),
+            enabled: true,
+            custom_headers: BTreeMap::from([("x-opencode-session".into(), "session-abc".into())]),
+            models: vec![ProviderModel {
+                id: "m1".into(),
+                alias: "test-model".into(),
+                upstream_model: "upstream-model".into(),
+                enabled: true,
+                max_output_tokens: None,
+                max_tokens_field: MaxTokensField::default(),
+                extra: Default::default(),
+            }],
+        }],
+        ..Config::default()
+    };
+    let gateway = serve_app(config, temp_config_path()).await;
+
+    assert_eq!(
+        post_messages(&gateway, &messages_body("test-model", false))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [("x-opencode-session".to_owned(), "session-abc".to_owned())],
+        "the configured header must be sent upstream"
+    );
+}
+
 /// When the provider an alias names refuses (quota, credential, plan), another enabled
 /// provider answers instead of the client seeing the refusal.
 #[tokio::test]
@@ -545,6 +619,172 @@ async fn a_refusing_provider_falls_over_to_another() {
     let response = post_messages(&gateway, &messages_body("test-model", false)).await;
     assert_eq!(response.status(), 200);
     assert_eq!(backup.last_request()["model"], "backup-model");
+}
+
+/// CommandCode reports an exhausted balance as 400. Provider failover must treat that
+/// like any other account refusal, not as a malformed request.
+#[tokio::test]
+async fn a_400_balance_error_falls_over_to_another_provider() {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+    use common::{serve_app, temp_config_path};
+    use gateway_core::config::{Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use tokio::net::TcpListener;
+
+    let refusing = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"message":"You have insufficient credits to make this request.","type":"invalid_request_error"}}"#,
+            )
+                .into_response()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let primary_address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, refusing).await.unwrap() });
+
+    let backup = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+
+    let model = |alias: &str, upstream: &str| ProviderModel {
+        id: upstream.into(),
+        alias: alias.into(),
+        upstream_model: upstream.into(),
+        enabled: true,
+        max_output_tokens: None,
+        max_tokens_field: MaxTokensField::default(),
+        extra: Default::default(),
+    };
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        failover: true,
+        providers: vec![
+            Provider {
+                id: "primary".into(),
+                name: "out of credit".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: format!("http://{primary_address}"),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("test-model", "primary-model")],
+            },
+            Provider {
+                id: "backup".into(),
+                name: "backup".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: backup.base_url.clone(),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("backup-model", "backup-model")],
+            },
+        ],
+        ..Config::default()
+    };
+    let gateway = serve_app(config, temp_config_path()).await;
+
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(backup.last_request()["model"], "backup-model");
+}
+
+/// A fallback reached through a refusal must be sanitized the same way a fallback reached
+/// through a stall is.
+#[tokio::test]
+async fn a_refusal_fallback_does_not_receive_another_providers_thinking() {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+    use common::{serve_app, temp_config_path};
+    use gateway_core::config::{Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use tokio::net::TcpListener;
+
+    let refusing = Router::new().route(
+        "/v1/messages",
+        post(|| async { (StatusCode::TOO_MANY_REQUESTS, "quota exhausted").into_response() }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let primary_address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, refusing).await.unwrap() });
+
+    let backup = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+
+    let model = |alias: &str, upstream: &str| ProviderModel {
+        id: upstream.into(),
+        alias: alias.into(),
+        upstream_model: upstream.into(),
+        enabled: true,
+        max_output_tokens: None,
+        max_tokens_field: MaxTokensField::default(),
+        extra: Default::default(),
+    };
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        failover: true,
+        providers: vec![
+            Provider {
+                id: "primary".into(),
+                name: "exhausted".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: format!("http://{primary_address}"),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("test-model", "primary-model")],
+            },
+            Provider {
+                id: "backup".into(),
+                name: "backup".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: backup.base_url.clone(),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("backup-model", "backup-model")],
+            },
+        ],
+        ..Config::default()
+    };
+    let gateway = serve_app(config, temp_config_path()).await;
+
+    let payload = json!({
+        "model": "test-model",
+        "max_tokens": 64,
+        "stream": false,
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "the primary's reasoning", "signature": "sig-primary"},
+                {"type": "text", "text": "hi"}
+            ]},
+            {"role": "user", "content": "again"}
+        ]
+    });
+    let response = post_messages(&gateway, &payload).await;
+    assert_eq!(response.status(), 200);
+
+    let sent = backup.last_request();
+    assert_eq!(sent["model"], "backup-model");
+    assert!(
+        sent.get("thinking").is_none(),
+        "thinking mode must be off for a provider that never issued the blocks"
+    );
+    assert!(
+        !sent.to_string().contains("\"thinking\""),
+        "no reasoning block may be replayed to another provider: {sent}"
+    );
 }
 
 /// "Working but slow" never returns an error, so only a clock can tell it apart from a
@@ -615,11 +855,37 @@ async fn a_stalling_route_is_abandoned_for_another_provider() {
     };
     let gateway = serve_app(config, temp_config_path()).await;
 
+    // The stalled route already produced reasoning that the backup never issued. Replaying
+    // it would be rejected by an endpoint that runs in thinking mode (DeepSeek does), so
+    // the fallback must see neither the blocks nor the switch.
+    let payload = json!({
+        "model": "test-model",
+        "max_tokens": 64,
+        "stream": false,
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "the slow provider's reasoning", "signature": "sig-slow"},
+                {"type": "text", "text": "hi"}
+            ]},
+            {"role": "user", "content": "again"}
+        ]
+    });
     let started = Instant::now();
-    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    let response = post_messages(&gateway, &payload).await;
     let elapsed = started.elapsed();
     assert_eq!(response.status(), 200);
-    assert_eq!(backup.last_request()["model"], "backup-model");
+    let sent = backup.last_request();
+    assert_eq!(sent["model"], "backup-model");
+    assert!(
+        sent.get("thinking").is_none(),
+        "thinking mode must be off for a provider that never issued the blocks"
+    );
+    assert!(
+        !sent.to_string().contains("\"thinking\""),
+        "no reasoning block may be replayed to another provider: {sent}"
+    );
     assert!(
         elapsed < Duration::from_secs(3),
         "the stalled route should have been abandoned, took {elapsed:?}"
@@ -672,5 +938,320 @@ async fn unsigned_reasoning_is_replayed_to_a_compatible_upstream() {
     assert!(
         sent["messages"][1]["content"][0].get("signature").is_none(),
         "a signature is not invented"
+    );
+}
+
+/// A provider can send its opening event and then fall silent. The connection stays
+/// healthy, so only a clock between events can end the wait; without it the client hangs
+/// for as long as the provider stays quiet.
+#[tokio::test]
+async fn a_stream_that_goes_quiet_is_ended_with_a_timeout_error() {
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+    use bytes::Bytes;
+    use common::{serve_state, temp_config_path};
+    use gateway_core::config::{Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use gateway_server::state::AppState;
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    let quiet = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            let body = Body::from_stream(async_stream::stream! {
+                yield Ok::<_, std::io::Error>(Bytes::from_static(
+                    b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"upstream-model\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                ));
+                // Still connected, but it has nothing more to say.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+            ([(CONTENT_TYPE, "text/event-stream")], body).into_response()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, quiet).await.unwrap() });
+
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        stream_idle_ms: 300,
+        providers: vec![Provider {
+            id: "p1".into(),
+            name: "quiet".into(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: format!("http://{address}"),
+            api_key: "k".into(),
+            api_keys: Vec::new(),
+            enabled: true,
+            custom_headers: Default::default(),
+            models: vec![ProviderModel {
+                id: "m1".into(),
+                alias: "test-model".into(),
+                upstream_model: "upstream-model".into(),
+                enabled: true,
+                max_output_tokens: None,
+                max_tokens_field: MaxTokensField::default(),
+                extra: Default::default(),
+            }],
+        }],
+        ..Config::default()
+    };
+    let state = AppState::new(config, temp_config_path()).unwrap();
+    let gateway = serve_state(state.clone()).await;
+
+    let started = Instant::now();
+    let response = post_messages(&gateway, &messages_body("test-model", true)).await;
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("timeout_error"),
+        "the stream should end with a timeout error, got: {body}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the idle timeout should end the stream quickly, took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        state.is_slow("p1/m1"),
+        "a route that stalled mid-stream must be avoided next time"
+    );
+}
+
+/// A non-streaming client has received nothing when the upstream stream fails, so unlike
+/// a streaming client it can still be answered by another provider.
+#[tokio::test]
+async fn a_failed_whole_response_is_replayed_elsewhere() {
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+    use bytes::Bytes;
+    use common::{serve_app, temp_config_path};
+    use gateway_core::config::{Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    let quiet = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            let body = Body::from_stream(async_stream::stream! {
+                yield Ok::<_, std::io::Error>(Bytes::from_static(
+                    b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"upstream-model\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                ));
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+            ([(CONTENT_TYPE, "text/event-stream")], body).into_response()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let primary_address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, quiet).await.unwrap() });
+
+    let backup = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+
+    let model = |alias: &str, upstream: &str| ProviderModel {
+        id: upstream.into(),
+        alias: alias.into(),
+        upstream_model: upstream.into(),
+        enabled: true,
+        max_output_tokens: None,
+        max_tokens_field: MaxTokensField::default(),
+        extra: Default::default(),
+    };
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        failover: true,
+        stream_idle_ms: 300,
+        providers: vec![
+            Provider {
+                id: "primary".into(),
+                name: "quiet".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: format!("http://{primary_address}"),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("test-model", "primary-model")],
+            },
+            Provider {
+                id: "backup".into(),
+                name: "backup".into(),
+                protocol: ProviderProtocol::Anthropic,
+                base_url: backup.base_url.clone(),
+                api_key: "k".into(),
+                api_keys: Vec::new(),
+                enabled: true,
+                custom_headers: Default::default(),
+                models: vec![model("backup-model", "backup-model")],
+            },
+        ],
+        ..Config::default()
+    };
+    let gateway = serve_app(config, temp_config_path()).await;
+
+    let started = Instant::now();
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    assert_eq!(response.status(), 200);
+    let provider = response.headers()["x-llm-gateway-provider"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let body = response.text().await.unwrap();
+    assert_eq!(provider, "backup");
+    assert!(
+        body.contains("Let me check"),
+        "the backup's answer should be returned, got: {body}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the stalled attempt should not delay the replay, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(backup.last_request()["model"], "backup-model");
+}
+
+/// Quota ranking decides which account is tried first, and a refusal takes that account
+/// out of the running for the next request.
+#[tokio::test]
+async fn quota_ranking_uses_the_best_account_and_skips_a_refused_one() {
+    use axum::http::{header::CONTENT_TYPE, HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::post;
+    use axum::Router;
+    use common::{serve_state, temp_config_path};
+    use gateway_core::config::{ApiKey, Config, Provider, ProviderModel};
+    use gateway_core::upstream::MaxTokensField;
+    use gateway_server::quota::{KeyQuota, ProviderQuota, WindowUsage};
+    use gateway_server::state::AppState;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |headers: HeaderMap| {
+            let recorder = recorder.clone();
+            async move {
+                let key = headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                recorder.lock().unwrap().push(key.clone());
+                let response: Response = match key.as_str() {
+                    // CommandCode reports an exhausted balance as a 400, not a 429.
+                    "key-best" => (
+                        StatusCode::BAD_REQUEST,
+                        r#"{"error":{"message":"You have insufficient credits to make this request.","type":"invalid_request_error"}}"#,
+                    )
+                        .into_response(),
+                    "key-exceeded" => {
+                        (StatusCode::TOO_MANY_REQUESTS, "weekly limit").into_response()
+                    }
+                    _ => {
+                        ([(CONTENT_TYPE, "text/event-stream")], TEXT_AND_TOOL_SSE).into_response()
+                    }
+                };
+                response
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let config = Config {
+        protocol_mode: ProtocolMode::PrimaryAnthropic,
+        providers: vec![Provider {
+            id: "p1".into(),
+            name: "mock".into(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: format!("http://{address}"),
+            api_key: "key-low".into(),
+            api_keys: vec![
+                ApiKey {
+                    id: "k2".into(),
+                    name: "exceeded".into(),
+                    key: "key-exceeded".into(),
+                },
+                ApiKey {
+                    id: "k3".into(),
+                    name: "best".into(),
+                    key: "key-best".into(),
+                },
+            ],
+            enabled: true,
+            custom_headers: Default::default(),
+            models: vec![ProviderModel {
+                id: "m1".into(),
+                alias: "test-model".into(),
+                upstream_model: "upstream-model".into(),
+                enabled: true,
+                max_output_tokens: None,
+                max_tokens_field: MaxTokensField::default(),
+                extra: Default::default(),
+            }],
+        }],
+        ..Config::default()
+    };
+
+    let reset = gateway_server::quota::now_ms() + 3_600_000;
+    let state = AppState::new(config, temp_config_path()).unwrap();
+    state.store_quota(ProviderQuota {
+        provider_id: "p1".into(),
+        supported: true,
+        fetched_at: gateway_server::quota::now_ms(),
+        keys: vec![
+            KeyQuota {
+                key: "key-low".into(),
+                monthly_credits: Some(2.0),
+                ..KeyQuota::default()
+            },
+            KeyQuota {
+                key: "key-exceeded".into(),
+                monthly_credits: Some(34.9),
+                weekly: Some(WindowUsage {
+                    used: 35.0,
+                    cap: 35.0,
+                    exceeded: true,
+                    reset_at: Some(reset),
+                }),
+                ..KeyQuota::default()
+            },
+            KeyQuota {
+                key: "key-best".into(),
+                monthly_credits: Some(55.8),
+                weekly: Some(WindowUsage {
+                    used: 14.2,
+                    cap: 35.0,
+                    exceeded: false,
+                    reset_at: Some(reset),
+                }),
+                ..KeyQuota::default()
+            },
+        ],
+    });
+    let gateway = serve_state(state).await;
+
+    // The account with the most usable credit is tried first; the exhausted one is not.
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(seen.lock().unwrap().clone(), vec!["key-best", "key-low"]);
+
+    // `key-best` was refused, so the next request starts with the account that answered.
+    let response = post_messages(&gateway, &messages_body("test-model", false)).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        vec!["key-best", "key-low", "key-low"]
     );
 }

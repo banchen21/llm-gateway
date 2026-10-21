@@ -7,6 +7,7 @@ pub mod api;
 pub mod logging;
 pub mod notify;
 pub mod proxy;
+pub mod quota;
 pub mod state;
 pub mod webui;
 
@@ -41,6 +42,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(api::admin::logs).delete(api::admin::clear_logs),
         )
         .route("/admin/provider-models", post(api::admin::provider_models))
+        .route(
+            "/admin/provider-quota",
+            get(api::admin::quotas).post(api::admin::provider_quota),
+        )
         // Everything else is a request for the GUI, which is served only when enabled.
         .fallback(gui)
         .layer(TraceLayer::new_for_http())
@@ -87,5 +92,8 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
             )
         })?;
     tracing::info!("llm-gateway listening on http://{address}");
+    // Key choice depends on account quotas, so they are refreshed in the background for
+    // as long as the gateway serves. Nothing waits on the first reading.
+    quota::spawn_refresh(state.clone());
     axum::serve(listener, app(state)).await
 }

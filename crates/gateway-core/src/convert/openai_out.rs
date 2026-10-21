@@ -30,7 +30,10 @@ pub fn stream_response(
                 Ok(event) => event,
                 Err(error) => {
                     yield Ok(sse(&json!({
-                        "error": {"message": error.to_string(), "type": "server_error"},
+                        "error": {
+                            "message": error.to_string(),
+                            "type": error.openai_error_type(),
+                        },
                     })));
                     yield Ok(sse_done());
                     return;

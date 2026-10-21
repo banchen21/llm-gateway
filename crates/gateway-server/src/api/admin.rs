@@ -176,9 +176,15 @@ pub async fn clear_logs(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     Json(json!({"cleared": cleared})).into_response()
 }
 
-/// The provider fields a model listing needs, which may be unsaved drafts from the GUI.
+/// The provider fields a probe needs, which may be unsaved drafts from the GUI.
 #[derive(Deserialize)]
 pub struct ProviderProbe {
+    /// Present for a saved provider; blank for a draft, whose base URL names the cache
+    /// entry instead.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub protocol: String,
     pub base_url: String,
     #[serde(default)]
@@ -187,6 +193,60 @@ pub struct ProviderProbe {
     pub api_keys: Vec<gateway_core::config::ApiKey>,
     #[serde(default)]
     pub custom_headers: std::collections::BTreeMap<String, String>,
+}
+
+impl ProviderProbe {
+    /// The probe as a provider, which is what the quota reader takes.
+    fn as_provider(&self) -> gateway_core::config::Provider {
+        gateway_core::config::Provider {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            protocol: if self.protocol == "anthropic" {
+                gateway_core::upstream::ProviderProtocol::Anthropic
+            } else {
+                gateway_core::upstream::ProviderProtocol::OpenAi
+            },
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            api_keys: self.api_keys.clone(),
+            enabled: true,
+            custom_headers: self.custom_headers.clone(),
+            models: Vec::new(),
+        }
+    }
+}
+
+/// The quota readings the gateway already has, for the GUI to render without probing.
+pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize(&state, &headers) {
+        return openai_error(error);
+    }
+    Json(json!({"providers": state.quota_snapshot()})).into_response()
+}
+
+/// Reads one provider's account quotas, including for unsaved drafts.
+///
+/// Only endpoints with a quota API this gateway knows how to read report `supported`;
+/// anything else answers `supported: false` so the GUI can leave the panel out.
+pub async fn provider_quota(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(probe): Json<ProviderProbe>,
+) -> Response {
+    if let Err(error) = authorize(&state, &headers) {
+        return openai_error(error);
+    }
+    let provider = probe.as_provider();
+    if crate::quota::api_root(&provider.base_url).is_none() {
+        return Json(json!({"supported": false, "quota": null})).into_response();
+    }
+    if crate::api::provider_keys(&provider).is_empty() {
+        return openai_error(Error::bad_request(
+            "fill in an API key before reading its quota",
+        ));
+    }
+    let quota = crate::quota::refresh(&state, &provider).await;
+    Json(json!({"supported": true, "quota": quota})).into_response()
 }
 
 /// Asks the upstream endpoint which models it serves.
@@ -217,24 +277,29 @@ pub async fn provider_models(
 
     let url = format!("{}/v1/models", probe.base_url.trim_end_matches('/'));
     let anthropic = probe.protocol == "anthropic";
-    let response = match gateway_core::upstream::send_with_keys(&keys, 0, |key| {
-        // A model listing is a convenience, not a request worth waiting minutes for.
-        let mut request = state
-            .http
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(30));
-        request = if anthropic {
+    let response = match gateway_core::upstream::send_with_keys(
+        &keys,
+        0,
+        |key| {
+            // A model listing is a convenience, not a request worth waiting minutes for.
+            let mut request = state
+                .http
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(30));
+            request = if anthropic {
+                request
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01")
+            } else {
+                request.bearer_auth(key)
+            };
+            for (name, value) in &probe.custom_headers {
+                request = request.header(name, value);
+            }
             request
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01")
-        } else {
-            request.bearer_auth(key)
-        };
-        for (name, value) in &probe.custom_headers {
-            request = request.header(name, value);
-        }
-        request
-    })
+        },
+        None,
+    )
     .await
     {
         Ok(response) => response,

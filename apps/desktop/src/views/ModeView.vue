@@ -43,6 +43,10 @@ function toggleSlow(enabled: boolean) {
   config.slow_after_ms = enabled ? 5000 : 0
 }
 
+function toggleIdle(enabled: boolean) {
+  config.stream_idle_ms = enabled ? 120000 : 0
+}
+
 function isLoopback(bind: string): boolean {
   const value = bind.trim()
   return value === 'localhost' || value === '127.0.0.1' || value === '::1'
@@ -212,8 +216,9 @@ async function copy(text: string) {
         <span class="failover-label">额度用尽时自动切换供应商</span>
       </div>
       <p class="gw-hint">
-        当别名指向的供应商返回 429（额度）、401（密钥）或 403（套餐）时，按「供应商」页里的顺序尝试其他已启用的供应商，
-        并用它们的第一个模型顶替。请求日志会记录实际应答的供应商与模型。
+        当别名指向的供应商返回 429（额度）、401（密钥）、403（套餐）或 400（余额不足）时，
+        按「供应商」页里的顺序尝试其他已启用的供应商，并用它们的第一个模型顶替。
+        请求日志会记录实际应答的供应商与模型。
       </p>
 
       <el-divider />
@@ -234,6 +239,27 @@ async function copy(text: string) {
       <p class="gw-hint">
         「能连上但很慢」不会报错，只有时钟能发现。超过这个时间仍没有首字节时，网关放弃这次调用、
         把该路由标记为缓慢两分钟，并改用其他供应商；期间新请求会直接绕开它。设为 0 关闭。
+      </p>
+
+      <el-divider />
+
+      <div class="failover">
+        <el-switch :model-value="config.stream_idle_ms > 0" @update:model-value="toggleIdle" />
+        <span class="failover-label">流式响应静默超时</span>
+        <el-input-number
+          v-if="config.stream_idle_ms > 0"
+          v-model="config.stream_idle_ms"
+          :min="1000"
+          :max="600000"
+          :step="1000"
+          size="small"
+        />
+        <span v-if="config.stream_idle_ms > 0" class="gw-hint">毫秒内没有新事件就结束响应</span>
+      </div>
+      <p class="gw-hint">
+        首字节之后，上游也可能长时间不再发送任何事件。超过这个时间没有新事件时，网关会向客户端发送
+        超时错误并结束本次响应，同时把该路由标记为缓慢；连续超时会逐步延长冷却时间，成功应答后重置。
+        设为 0 关闭。
       </p>
     </el-card>
   </div>

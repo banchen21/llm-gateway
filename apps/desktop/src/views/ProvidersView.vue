@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Download, Plus } from '@element-plus/icons-vue'
-import { fetchProviderModels } from '../api/client'
+import { Delete, Download, Plus, Refresh } from '@element-plus/icons-vue'
+import { fetchProviderModels, fetchQuotas, refreshProviderQuota } from '../api/client'
+import HeaderRow from '../components/HeaderRow.vue'
 import { useGateway } from '../store'
 import {
   emptyModel,
   emptyProvider,
+  type KeyQuota,
   type Provider,
   type ProviderModel,
   type ProviderProtocol,
+  type ProviderQuota,
   type MaxTokensField,
+  type QuotaWindow,
 } from '../api/types'
 
 const gateway = useGateway()
@@ -112,21 +116,22 @@ function headerEntries(provider: Provider) {
   return Object.entries(provider.custom_headers)
 }
 
-/**
- * Renames or updates a header. Renaming rebuilds the record, so it is committed on blur
- * rather than per keystroke — an index-keyed row would otherwise be recreated mid-typing.
- */
-function setHeader(provider: Provider, previous: string, next: string, value?: string) {
+/** Names a header may not take, because another row already holds one. */
+function headerNames(provider: Provider, except: string): string[] {
+  return Object.keys(provider.custom_headers).filter((name) => name !== except)
+}
+
+function renameHeader(provider: Provider, previous: string, next: string) {
+  if (next === previous) return
   const rebuilt: Record<string, string> = {}
-  for (const [key, current] of Object.entries(provider.custom_headers)) {
-    if (key === previous) {
-      const name = next.trim() || previous
-      rebuilt[name] = value ?? current
-    } else {
-      rebuilt[key] = current
-    }
+  for (const [name, current] of Object.entries(provider.custom_headers)) {
+    rebuilt[name === previous ? next : name] = current
   }
   provider.custom_headers = rebuilt
+}
+
+function setHeaderValue(provider: Provider, name: string, value: string) {
+  provider.custom_headers = { ...provider.custom_headers, [name]: value }
 }
 
 function addHeader(provider: Provider) {
@@ -186,6 +191,179 @@ const baseUrlHint: Record<ProviderProtocol, string> = {
 }
 
 const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
+
+/**
+ * Account quotas, keyed by provider id; an unsaved draft uses its base URL, which is
+ * also what the gateway caches it under.
+ */
+const quotas = ref<Record<string, ProviderQuota>>({})
+const quotaLoading = ref<Record<string, boolean>>({})
+const quotaError = ref<Record<string, string>>({})
+
+function providerKey(provider: Provider): string {
+  return provider.id || provider.base_url.trim()
+}
+
+function isCommandCode(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname
+    return host === 'commandcode.ai' || host.endsWith('.commandcode.ai')
+  } catch {
+    return false
+  }
+}
+
+function quotaFor(provider: Provider): ProviderQuota | undefined {
+  // A just-saved provider gains an id, but the reading taken while it was a draft is
+  // still filed under its base URL.
+  const quota =
+    quotas.value[providerKey(provider)] ?? quotas.value[provider.base_url.trim()]
+  return quota?.supported ? quota : undefined
+}
+
+/** Picks up readings the background refresh has already made, without a network call. */
+async function loadQuotas() {
+  try {
+    const { providers } = await fetchQuotas()
+    // Merge rather than replace: a draft's manual reading is not in the gateway's cache
+    // and must survive the periodic re-read.
+    const next: Record<string, ProviderQuota> = { ...quotas.value }
+    for (const quota of providers) {
+      next[quota.provider_id] = quota
+    }
+    quotas.value = next
+  } catch {
+    // The status panel simply stays empty until the gateway answers.
+  }
+}
+
+let quotaTimer: ReturnType<typeof setInterval> | undefined
+
+onMounted(() => {
+  void loadQuotas()
+  // The gateway refreshes in the background; this only re-reads its cache.
+  quotaTimer = setInterval(() => void loadQuotas(), 60_000)
+})
+
+onUnmounted(() => {
+  if (quotaTimer) clearInterval(quotaTimer)
+})
+
+async function refreshQuota(provider: Provider) {
+  const key = providerKey(provider)
+  if (!key) {
+    ElMessage.warning('请先填写 Base URL')
+    return
+  }
+  quotaLoading.value = { ...quotaLoading.value, [key]: true }
+  quotaError.value = { ...quotaError.value, [key]: '' }
+  try {
+    const result = await refreshProviderQuota(provider)
+    if (!result.supported || !result.quota) {
+      ElMessage.info('这个端点没有网关支持的额度接口')
+      return
+    }
+    // Keep both names: a draft is cached by base URL, the saved provider by id.
+    quotas.value = {
+      ...quotas.value,
+      [key]: result.quota,
+      [result.quota.provider_id]: result.quota,
+    }
+  } catch (problem) {
+    quotaError.value = {
+      ...quotaError.value,
+      [key]: problem instanceof Error ? problem.message : String(problem),
+    }
+  } finally {
+    quotaLoading.value = { ...quotaLoading.value, [key]: false }
+  }
+}
+
+function creditsOf(entry: KeyQuota): number | null {
+  const values = [entry.monthly_credits, entry.purchased_credits, entry.free_credits].filter(
+    (value): value is number => value !== null,
+  )
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null
+}
+
+/**
+ * The same cutoff the gateway uses: CommandCode answers "insufficient credits" below
+ * roughly one credit, even for a small request.
+ */
+const MIN_USABLE_CREDITS = 1.0
+
+function creditsText(entry: KeyQuota): string {
+  const credits = creditsOf(entry)
+  return credits === null ? '—' : credits.toFixed(2)
+}
+
+function windowText(window: QuotaWindow | null): string {
+  return window ? `${window.used.toFixed(2)} / ${window.cap.toFixed(0)}` : '—'
+}
+
+function resetText(ms: number | null): string {
+  if (!ms) return ''
+  return new Date(ms).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function updatedText(quota: ProviderQuota): string {
+  return new Date(quota.fetched_at).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+type TagType = 'success' | 'warning' | 'danger' | 'info' | 'primary'
+
+/**
+ * The account the quota data says to use first: known credits, no closed window, and the
+ * most credit left. Runtime refusals can move it down for a minute; the tag describes the
+ * quota-based preference, which is what the panel is showing.
+ */
+function isPreferred(provider: Provider, entry: KeyQuota): boolean {
+  const keys = quotaFor(provider)?.keys ?? []
+  let best: KeyQuota | null = null
+  let bestCredits = -Infinity
+  for (const candidate of keys) {
+    if (quotaState(candidate).type !== 'success') continue
+    const credits = creditsOf(candidate)
+    if (credits === null || credits < MIN_USABLE_CREDITS) continue
+    if (credits > bestCredits) {
+      best = candidate
+      bestCredits = credits
+    }
+  }
+  return best === entry
+}
+
+/** The same verdict the request path uses, so the table explains what will be chosen. */
+function quotaState(entry: KeyQuota): { label: string; type: TagType } {
+  if (entry.error) return { label: '读取失败，暂不参与排序', type: 'warning' }
+  const now = Date.now()
+  const windows = [
+    ['5 小时', entry.five_hour],
+    ['本周', entry.weekly],
+  ] as const
+  for (const [name, window] of windows) {
+    if (window?.exceeded && (!window.reset_at || window.reset_at > now)) {
+      const reset = resetText(window.reset_at)
+      return {
+        label: reset ? `${name}超限 · ${reset} 重置` : `${name}超限`,
+        type: 'danger',
+      }
+    }
+  }
+  const credits = creditsOf(entry)
+  if (credits !== null && credits < MIN_USABLE_CREDITS) {
+    return { label: `额度不足（< ${MIN_USABLE_CREDITS.toFixed(2)}）`, type: 'danger' }
+  }
+  return { label: '可用', type: 'success' }
+}
 </script>
 
 <template>
@@ -266,36 +444,118 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
               添加密钥
             </el-button>
             <div class="gw-hint">
-              同一个供应商的多个账号轮流使用；某个 key 被限流（429）或被拒（401/403）时自动换下一个。
+              同一个供应商的多个账号自动轮换；某个 key 被限流（429）或被拒（401/403）时换下一个。
+              CommandCode 端点还会按账号额度排序，额度充足且未超限的账号优先。
             </div>
           </div>
         </el-form-item>
 
         <el-form-item label="自定义请求头">
           <div class="headers">
-            <div v-for="([key, value], headerIndex) in headerEntries(provider)" :key="headerIndex" class="header-row">
-              <el-input
-                :model-value="key"
-                size="small"
-                placeholder="名称"
-                @change="(next: string) => setHeader(provider, key, next)"
-              />
-              <el-input
-                :model-value="value"
-                size="small"
-                placeholder="值"
-                @update:model-value="(next: string) => setHeader(provider, key, key, next)"
-              />
-              <el-button text size="small" type="danger" @click="removeHeader(provider, key)">
-                移除
-              </el-button>
-            </div>
+            <HeaderRow
+              v-for="([key, value], headerIndex) in headerEntries(provider)"
+              :key="headerIndex"
+              :name="key"
+              :value="value"
+              :taken="headerNames(provider, key)"
+              @rename="(next: string) => renameHeader(provider, key, next)"
+              @update:value="(next: string) => setHeaderValue(provider, key, next)"
+              @remove="removeHeader(provider, key)"
+            />
             <el-button text size="small" :icon="Plus" @click="addHeader(provider)">
               添加请求头
             </el-button>
           </div>
         </el-form-item>
       </el-form>
+
+      <div v-if="isCommandCode(provider.base_url)" class="quota">
+        <div class="gw-section quota-head">
+          <span class="gw-section-title">账号额度</span>
+          <span class="gw-section-note">
+            后台每 5 分钟自动读取一次；请求优先使用额度充足、未超限的账号，窗口重置后自动恢复。
+          </span>
+          <div class="grow" />
+          <span v-if="quotaFor(provider)" class="gw-hint">
+            更新于 {{ updatedText(quotaFor(provider)!) }}
+          </span>
+          <el-button
+            size="small"
+            :icon="Refresh"
+            :loading="!!quotaLoading[providerKey(provider)]"
+            @click="refreshQuota(provider)"
+          >
+            刷新额度
+          </el-button>
+        </div>
+
+        <el-alert
+          v-if="quotaError[providerKey(provider)]"
+          type="error"
+          show-icon
+          :closable="false"
+          :title="quotaError[providerKey(provider)]"
+        />
+
+        <el-table
+          v-if="quotaFor(provider)?.keys.length"
+          :data="quotaFor(provider)!.keys"
+          size="small"
+          border
+        >
+          <el-table-column label="账号" min-width="160">
+            <template #default="{ row }">
+              <div class="quota-account">{{ row.account || row.hint }}</div>
+              <div class="gw-hint">{{ row.email || row.hint }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="套餐" width="150">
+            <template #default="{ row }">
+              <div>{{ row.plan || '—' }}</div>
+              <div class="gw-hint">{{ row.plan_status || '' }}</div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="剩余额度" width="110" align="right">
+            <template #default="{ row }">{{ creditsText(row) }}</template>
+          </el-table-column>
+
+          <el-table-column label="5 小时用量" width="140">
+            <template #default="{ row }">{{ windowText(row.five_hour) }}</template>
+          </el-table-column>
+
+          <el-table-column label="本周用量" width="140">
+            <template #default="{ row }">{{ windowText(row.weekly) }}</template>
+          </el-table-column>
+
+          <el-table-column label="状态" min-width="210">
+            <template #default="{ row }">
+              <el-tag
+                v-if="isPreferred(provider, row)"
+                type="primary"
+                size="small"
+                effect="dark"
+                class="quota-preferred"
+              >
+                当前优先
+              </el-tag>
+              <el-tag :type="quotaState(row).type" size="small" effect="plain">
+                {{ quotaState(row).label }}
+              </el-tag>
+              <div v-if="row.error" class="gw-hint quota-reason">{{ row.error }}</div>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div v-else class="gw-hint quota-empty">
+          {{
+            provider.enabled
+              ? '还没有读到额度。点击「刷新额度」立即读取一次；后台也会自动读取。'
+              : '供应商已停用；启用后后台会自动读取额度。'
+          }}
+        </div>
+      </div>
 
       <div class="gw-section models-head">
         <span class="gw-section-title">模型</span>
@@ -449,12 +709,6 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
   width: 100%;
 }
 
-.header-row {
-  display: grid;
-  grid-template-columns: 220px 1fr auto;
-  gap: 8px;
-}
-
 .keys {
   display: flex;
   flex-direction: column;
@@ -483,6 +737,31 @@ const tokensFields: MaxTokensField[] = ['max_tokens', 'max_completion_tokens']
 
 .models-head {
   margin-top: 20px;
+}
+
+.quota {
+  margin-top: 20px;
+}
+
+.quota-head {
+  margin-bottom: 10px;
+}
+
+.quota-account {
+  font-weight: 500;
+}
+
+.quota-preferred {
+  margin-right: 6px;
+}
+
+.quota-reason {
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.quota-empty {
+  padding: 8px 0;
 }
 
 .full {

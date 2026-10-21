@@ -63,7 +63,10 @@ pub fn stream_response(
                 Err(error) => {
                     yield Ok(sse("error", json!({
                         "type": "error",
-                        "error": {"type": "api_error", "message": error.to_string()},
+                        "error": {
+                            "type": error.anthropic_error_type(),
+                            "message": error.to_string(),
+                        },
                     })));
                     return;
                 }

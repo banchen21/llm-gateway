@@ -24,6 +24,13 @@ pub enum Error {
     #[error("provider error: {0}")]
     Provider(String),
 
+    /// An upstream produced nothing for longer than the gateway allows.
+    ///
+    /// Separate from [`Error::Http`] because the connection is still open: the provider
+    /// simply stopped talking, and waiting longer will not change that.
+    #[error("upstream timeout: {0}")]
+    Timeout(String),
+
     /// A transport failure reaching or reading from an upstream.
     ///
     /// The whole source chain is rendered, because `reqwest`'s top-level message is only
@@ -50,14 +57,43 @@ fn transport_message(error: &reqwest::Error) -> String {
     message
 }
 
+/// Whether a body describes the account's balance or limits rather than the request.
+///
+/// CommandCode reports an exhausted credit balance as HTTP 400 with "insufficient
+/// credits", while its rate-limit windows use 429. Treating that 400 as a malformed
+/// request would pin the gateway to the one account that cannot answer.
+pub fn names_account_problem(body: &str) -> bool {
+    const PHRASES: &[&str] = &[
+        "insufficient credit",
+        "insufficient quota",
+        "credits to make this request",
+        "purchase more credits",
+        "credit balance",
+        "quota exceeded",
+        "exceeded your current quota",
+        "reached your weekly",
+        "weekly usage limit",
+        "usage limit",
+    ];
+    let lower = body.to_ascii_lowercase();
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
 impl Error {
     /// Whether another provider might answer where this one refused.
     ///
     /// These are the refusals that are about the account rather than the request: quota
-    /// exhausted (429), a rejected credential (401), or a plan that excludes the model
-    /// (403). A malformed request would fail everywhere, so it is not included.
+    /// exhausted (429), a rejected credential (401), a plan that excludes the model
+    /// (403), or an exhausted balance reported as 400. A malformed request would fail
+    /// everywhere, so a 400 that does not name the account is not included.
     pub fn is_provider_refusal(&self) -> bool {
-        matches!(self, Error::Upstream { status, .. } if matches!(status, 401 | 403 | 429))
+        match self {
+            Error::Upstream { status, message } => {
+                matches!(status, 401 | 403 | 429)
+                    || (*status == 400 && names_account_problem(message))
+            }
+            _ => false,
+        }
     }
 
     /// The HTTP status this error should surface as at the gateway's edge.
@@ -68,6 +104,7 @@ impl Error {
             Error::Upstream { status, .. } if (400..600).contains(status) => *status,
             Error::Upstream { .. } => 502,
             Error::Provider(_) => 502,
+            Error::Timeout(_) => 504,
             Error::Http(error) if error.is_timeout() => 504,
             Error::Http(_) | Error::Io(_) => 502,
             Error::Json(_) => 400,
@@ -135,5 +172,31 @@ impl Error {
             status: status.as_u16(),
             message: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn an_exhausted_balance_reported_as_a_400_can_fail_over() {
+        assert!(Error::Upstream {
+            status: 400,
+            message:
+                r#"{"error":{"message":"You have insufficient credits to make this request."}}"#
+                    .into(),
+        }
+        .is_provider_refusal());
+        assert!(!Error::Upstream {
+            status: 400,
+            message: r#"{"error":{"message":"messages: field required"}}"#.into(),
+        }
+        .is_provider_refusal());
+        assert!(Error::Upstream {
+            status: 429,
+            message: "weekly limit".into(),
+        }
+        .is_provider_refusal());
     }
 }

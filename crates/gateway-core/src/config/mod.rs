@@ -44,7 +44,7 @@ impl ProtocolMode {
 /// Every field is serialized, including empty ones, because this struct is also the
 /// admin API's response body. A shape that varied with whether a map happened to be
 /// empty would force every consumer to treat present-but-empty and absent differently.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub protocol_mode: ProtocolMode,
@@ -62,6 +62,27 @@ pub struct Config {
     /// Zero disables it. This is what turns "working but 14 seconds" into "working":
     /// a provider that is merely slow never fails, so failover alone never sees it.
     pub slow_after_ms: u64,
+    /// End an upstream stream that has produced no event for this many milliseconds.
+    ///
+    /// Zero disables it. Unlike [`Self::slow_after_ms`], which only covers the opening,
+    /// this watches the whole response: a provider can send one event and then fall
+    /// silent, which would otherwise leave the client waiting indefinitely.
+    pub stream_idle_ms: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            protocol_mode: ProtocolMode::default(),
+            server: ServerConfig::default(),
+            web_ui: WebUiConfig::default(),
+            providers: Vec::new(),
+            default_provider_id: None,
+            failover: false,
+            slow_after_ms: 0,
+            stream_idle_ms: 120_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

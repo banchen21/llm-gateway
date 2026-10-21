@@ -34,6 +34,10 @@ see what actually happened.
   rerouted.
 - **Several keys per provider.** Separate accounts carry separate quotas, so requests
   rotate across their keys and fall through to the next one on 429, 401 or 403.
+- **Quota-aware rotation.** For CommandCode endpoints, the gateway reads each account's
+  remaining credits and five-hour/weekly windows in the background, prefers an account
+  that can answer, skips one whose window is closed until it resets, and stops choosing a
+  key that was just refused. The provider panel shows the same numbers.
 - **A GUI, in a window or in a browser.** The same interface runs as a desktop window and
   as a page on the gateway's port.
 - **Named inbound keys.** Issue one key per client and revoke them independently.
@@ -47,8 +51,10 @@ see what actually happened.
 - **Automatic failover.** When the provider an alias names refuses (quota, credential,
   plan), the other enabled providers are tried in order and the log records who answered.
 - **Stall detection.** A route that has not produced its first byte within a configurable
-  deadline is abandoned, marked slow for two minutes, and the request answers elsewhere —
-  "working but 14 seconds" never errors, so only a clock can catch it.
+  deadline is abandoned and the request answers elsewhere; a stream that goes silent for a
+  configurable interval is ended with a timeout instead of hanging the client. A route
+  that keeps stalling is avoided for longer each time (two minutes, doubling up to thirty),
+  and a successful answer clears its record.
 - **A speed test page.** One click runs every alias through the same fixed prompt and
   reports first-byte latency, total time and tokens per second.
 
@@ -109,6 +115,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `GET /admin/logs`, `DELETE /admin/logs` | always |
 | `GET /admin/health` | always |
 | `POST /admin/provider-models` | always |
+| `GET /admin/provider-quota`, `POST /admin/provider-quota` | always |
 | `GET /` (the GUI) | when the web GUI is enabled |
 
 Authentication accepts either `x-api-key` or `Authorization: Bearer`. With no key

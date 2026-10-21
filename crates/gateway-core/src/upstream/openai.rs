@@ -24,17 +24,23 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 
 pub async fn stream(call: UpstreamCall) -> Result<EventStream> {
     let body = request_body(&call)?;
-    let response = send_with_keys(&call.config.api_keys, call.key_start, |key| {
-        let mut request = call
-            .client
-            .post(call.config.endpoint("/v1/chat/completions"))
-            .bearer_auth(key)
-            .json(&body);
-        for (name, value) in &call.config.custom_headers {
-            request = request.header(name, value);
-        }
-        request
-    })
+    let notify = call.on_key_refused.clone();
+    let response = send_with_keys(
+        &call.config.api_keys,
+        call.key_start,
+        |key| {
+            let mut request = call
+                .client
+                .post(call.config.endpoint("/v1/chat/completions"))
+                .bearer_auth(key)
+                .json(&body);
+            for (name, value) in &call.config.custom_headers {
+                request = request.header(name, value);
+            }
+            request
+        },
+        notify.as_deref(),
+    )
     .await?;
     let status = response.status();
     if !status.is_success() {

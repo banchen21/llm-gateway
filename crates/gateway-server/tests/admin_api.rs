@@ -822,3 +822,61 @@ async fn the_upstream_model_list_is_fetched_for_the_gui() {
     let value: Value = response.json().await.unwrap();
     assert_eq!(value["models"], json!(["alpha", "zeta"]));
 }
+
+/// The quota panel starts empty and only claims support where the gateway knows the API.
+#[tokio::test]
+async fn quotas_are_listed_from_cache_and_only_probed_for_supported_endpoints() {
+    let path = temp_config_path();
+    let gateway = gateway_at(&path).await;
+
+    let cached: Value = reqwest::get(format!("{gateway}/admin/provider-quota"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(cached["providers"].as_array().unwrap().is_empty());
+
+    let unsupported = reqwest::Client::new()
+        .post(format!("{gateway}/admin/provider-quota"))
+        .json(&json!({
+            "id": "p1",
+            "name": "elsewhere",
+            "protocol": "open_ai",
+            "base_url": "https://example.com/v1",
+            "api_key": "k"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), 200);
+    let value: Value = unsupported.json().await.unwrap();
+    assert_eq!(value["supported"], false);
+    assert!(value["quota"].is_null());
+}
+
+/// A draft with no key cannot be probed, and the UI gets a usable message.
+#[tokio::test]
+async fn a_quota_probe_requires_a_key() {
+    let path = temp_config_path();
+    let gateway = gateway_at(&path).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway}/admin/provider-quota"))
+        .json(&json!({
+            "id": "",
+            "name": "",
+            "protocol": "open_ai",
+            "base_url": "https://api.commandcode.ai/provider",
+            "api_key": ""
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let value: Value = response.json().await.unwrap();
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("API key"));
+}
