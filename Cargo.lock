@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "directories",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -2083,7 +2083,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "llm-gateway-desktop"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "gateway-core",
  "gateway-server",
