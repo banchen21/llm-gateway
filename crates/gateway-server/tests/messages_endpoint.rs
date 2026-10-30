@@ -179,6 +179,27 @@ async fn a_non_streaming_request_returns_one_aggregated_message() {
     assert_eq!(value["usage"]["output_tokens"], 25);
 }
 
+/// axum's 2 MiB default body cap must not become the gateway's: one conversation with a
+/// couple of screenshots is larger than that, and the client would see a bare 413 before
+/// the request was ever routed.
+#[tokio::test]
+async fn a_body_larger_than_axums_default_limit_is_accepted_and_forwarded_whole() {
+    let upstream = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;
+    let gateway = start_gateway(&upstream, ProviderProtocol::Anthropic).await;
+
+    let padding = "a".repeat(3 * 1024 * 1024);
+    let mut payload = messages_body("test-model", false);
+    payload["messages"][0]["content"] = json!(padding);
+
+    let response = post_messages(&gateway, &payload).await;
+    assert_eq!(response.status(), 200);
+
+    // The upstream receives Anthropic-shaped content blocks, and the text is intact.
+    let sent = upstream.last_request();
+    let forwarded = sent["messages"][0]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(forwarded.len(), padding.len());
+}
+
 #[tokio::test]
 async fn the_upstream_receives_the_ir_rendered_as_anthropic() {
     let upstream = start_upstream("/v1/messages", TEXT_AND_TOOL_SSE).await;

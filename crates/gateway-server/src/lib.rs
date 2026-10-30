@@ -13,13 +13,21 @@ pub mod webui;
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use state::AppState;
+
+/// The largest request body the gateway will read.
+///
+/// axum caps bodies at 2 MiB by default, which one conversation carrying a screenshot
+/// or two already exceeds — the client then gets a bare 413 before the request has even
+/// been routed. Anthropic documents 32 MB as its own request ceiling, so mirroring it
+/// keeps the gateway out of the way while still bounding what it buffers in memory.
+const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
@@ -48,6 +56,8 @@ pub fn app(state: Arc<AppState>) -> Router {
         )
         // Everything else is a request for the GUI, which is served only when enabled.
         .fallback(gui)
+        // Covers every route, including the protocol endpoints whose bodies carry images.
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(TraceLayer::new_for_http())
         // The desktop GUI and the Vite dev server are served from a different origin
         // than the gateway, so these surfaces have to be reachable cross-origin.
