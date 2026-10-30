@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
+use axum::extract::DefaultBodyLimit;
 use axum::http::header::CONTENT_TYPE;
 use axum::routing::post;
 use axum::Router;
@@ -41,18 +42,22 @@ impl Upstream {
 pub async fn start_upstream(path: &'static str, sse: &'static str) -> Upstream {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
-    let app = Router::new().route(
-        path,
-        post(move |body: Bytes| {
-            let recorded = recorded.clone();
-            async move {
-                if let Ok(value) = serde_json::from_slice::<Value>(&body) {
-                    recorded.lock().unwrap().push(value);
+    let app = Router::new()
+        .route(
+            path,
+            post(move |body: Bytes| {
+                let recorded = recorded.clone();
+                async move {
+                    if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+                        recorded.lock().unwrap().push(value);
+                    }
+                    ([(CONTENT_TYPE, "text/event-stream")], sse)
                 }
-                ([(CONTENT_TYPE, "text/event-stream")], sse)
-            }
-        }),
-    );
+            }),
+        )
+        // The stand-in must not impose a cap of its own, or a test exercising the gateway's
+        // limit would be measuring axum's 2 MiB default instead.
+        .layer(DefaultBodyLimit::disable());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
